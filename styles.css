@@ -1,0 +1,60 @@
+:root {
+  color-scheme: only light;
+  --page-top: #d8f0ff;
+  --page-mid: #ecf7ff;
+  --page-bottom: #f6fff6;
+  --shell-border: #9ac7ea;
+  --shell-shadow: 0 20px 65px rgba(36, 94, 132, 0.26);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  font-family: "Space Grotesk", sans-serif;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(108, 187, 255, 0.36), transparent 45%),
+    radial-gradient(circle at 82% 86%, rgba(117, 224, 167, 0.3), transparent 42%),
+    linear-gradient(170deg, var(--page-top), var(--page-mid) 55%, var(--page-bottom));
+  overflow: hidden;
+}
+
+#app-shell {
+  width: min(96vw, 1320px);
+  aspect-ratio: 16 / 9;
+  border: 3px solid var(--shell-border);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: var(--shell-shadow);
+  background: #0a2130;
+}
+
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+#app-shell:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  aspect-ratio: auto;
+  border: none;
+  border-radius: 0;
+}
+
+#app-shell:fullscreen #game-canvas {
+  cursor: crosshair;
+}
