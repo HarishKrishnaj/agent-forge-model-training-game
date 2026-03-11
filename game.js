@@ -15,6 +15,7 @@
       lesson: "Open weights are easier to adapt for domain fine-tunes.",
       microLesson: "Llama 3.1: open weights, easier custom tuning.",
       trainingGain: 20,
+      accuracyBias: 2,
       dataCost: 2,
       computeCost: 12,
       playerSpeed: 210,
@@ -28,6 +29,7 @@
       lesson: "Qwen models are known for strong multilingual and coding tasks.",
       microLesson: "Qwen2.5: multilingual + coding-friendly behavior.",
       trainingGain: 24,
+      accuracyBias: 3,
       dataCost: 2,
       computeCost: 16,
       playerSpeed: 192,
@@ -41,12 +43,16 @@
       lesson: "Larger parameter counts can improve quality but raise compute needs.",
       microLesson: "Mistral Small: higher quality, higher compute cost.",
       trainingGain: 30,
+      accuracyBias: 4,
       dataCost: 3,
       computeCost: 22,
       playerSpeed: 178,
       projectileSpeed: 530,
     },
   ];
+
+  const TRAINING_PACKET_REQUIREMENTS = [20, 30, 40];
+  const TRAINING_PHASE_PROGRESS = [34, 33, 33];
 
   const DIFFICULTY_OPTIONS = [
     {
@@ -156,6 +162,15 @@
     return SQUAD_OPTIONS[state.settings.squadIndex];
   }
 
+  function getNextPacketRequirement() {
+    const resources = state.resources;
+    if (!resources) {
+      return TRAINING_PACKET_REQUIREMENTS[0];
+    }
+    const idx = resources.trainingPhase || 0;
+    return TRAINING_PACKET_REQUIREMENTS[idx] || 0;
+  }
+
   function isKeyDown(...codes) {
     for (const code of codes) {
       if (state.input.keysDown.has(code)) {
@@ -229,10 +244,12 @@
     const difficulty = getDifficulty();
     state.player = createPlayer();
     state.resources = {
-      data: 2,
+      data: 10,
       compute: 62,
       alignment: 100,
       training: 0,
+      trainingPhase: 0,
+      accuracy: 0,
       score: 0,
       timeLeft: difficulty.timeLimit,
       deployed: false,
@@ -243,7 +260,7 @@
     state.spawnTimer = difficulty.spawnInterval * 0.65;
     state.shardTimer = 1.2;
     state.timeElapsed = 0;
-    state.ui.notice = "Collect data and train your model.";
+    state.ui.notice = "Collect data packets for phase 1 training (need 20).";
     state.ui.noticeTimer = 2.4;
     state.result = null;
 
@@ -321,9 +338,9 @@
     if (nearStation(dataStation, 34)) {
       if (resources.compute >= 9) {
         resources.compute = clamp(resources.compute - 9, 0, 100);
-        resources.data += 2;
-        resources.score += 6;
-        setNotice("Synthetic data batch +2 generated.", 1.4);
+        resources.data += 10;
+        resources.score += 8;
+        setNotice("Synthetic data batch +10 generated.", 1.4);
       } else {
         setNotice("Need 9 compute to mint data.", 1.4);
       }
@@ -331,12 +348,16 @@
     }
 
     if (nearStation(cluster, 36)) {
-      if (resources.training >= 100) {
-        setNotice("Training complete. Move to deployment gate.", 1.5);
+      if (resources.trainingPhase >= TRAINING_PACKET_REQUIREMENTS.length) {
+        setNotice("Core training phases complete. Move to deployment gate.", 1.5);
         return;
       }
-      if (resources.data < model.dataCost) {
-        setNotice(`Need ${model.dataCost} data packets for next cycle.`, 1.5);
+
+      const phaseIdx = resources.trainingPhase;
+      const requiredPackets = TRAINING_PACKET_REQUIREMENTS[phaseIdx];
+
+      if (resources.data < requiredPackets) {
+        setNotice(`Need at least ${requiredPackets} data packets for phase ${phaseIdx + 1}.`, 1.7);
         return;
       }
       if (resources.compute < model.computeCost) {
@@ -344,21 +365,62 @@
         return;
       }
 
-      resources.data -= model.dataCost;
+      const bonusPacketsUsed = Math.min(20, Math.max(0, resources.data - requiredPackets));
+      const packetsUsed = requiredPackets + bonusPacketsUsed;
+      resources.data -= packetsUsed;
       resources.compute = clamp(resources.compute - model.computeCost, 0, 100);
-      const gain = model.trainingGain + getSquadSize();
-      resources.training = clamp(resources.training + gain, 0, 100);
-      resources.score += 14 + gain;
-      setNotice(`Training +${Math.round(gain)}%. ${model.label} updated.`, 1.6);
+
+      const progressGain = TRAINING_PHASE_PROGRESS[phaseIdx];
+      resources.training = clamp(resources.training + progressGain, 0, 100);
+      resources.trainingPhase = clamp(resources.trainingPhase + 1, 0, TRAINING_PACKET_REQUIREMENTS.length);
+
+      const baseAccuracyGain = 10 + model.accuracyBias + phaseIdx * 2;
+      const bonusAccuracyGain = bonusPacketsUsed * 0.7;
+      const accuracyGain = baseAccuracyGain + bonusAccuracyGain;
+      resources.accuracy = clamp(resources.accuracy + accuracyGain, 0, 100);
+
+      resources.score += 20 + Math.round(accuracyGain) + bonusPacketsUsed;
+
+      if (resources.trainingPhase >= TRAINING_PACKET_REQUIREMENTS.length) {
+        if (resources.accuracy < 50) {
+          setNotice(
+            `Training complete but accuracy ${Math.round(resources.accuracy)}% is below deploy threshold.`,
+            2.2
+          );
+        } else {
+          setNotice(`Training complete. Accuracy ${Math.round(resources.accuracy)}%. Deploy at gate.`, 2.2);
+        }
+      } else {
+        const nextReq = getNextPacketRequirement();
+        if (bonusPacketsUsed === 0) {
+          setNotice(
+            `Phase ${phaseIdx + 1}: minimum packets used. Accuracy +${Math.round(accuracyGain)}%. Next phase needs ${nextReq}.`,
+            2.3
+          );
+        } else {
+          setNotice(
+            `Phase ${phaseIdx + 1}: used ${packetsUsed} packets (+${bonusPacketsUsed} bonus). Accuracy +${Math.round(accuracyGain)}%. Next needs ${nextReq}.`,
+            2.3
+          );
+        }
+      }
       return;
     }
 
     if (nearStation(gate, 34)) {
       if (resources.training >= 100) {
         resources.deployed = true;
-        finishRun(true, "Agent successfully deployed to production.");
+        if (resources.accuracy < 50) {
+          finishRun(false, `Deployment failed: accuracy ${Math.round(resources.accuracy)}% is below 50%.`);
+        } else {
+          finishRun(true, `Agent deployed with ${Math.round(resources.accuracy)}% accuracy.`);
+        }
       } else {
-        setNotice("Deployment locked. Reach 100% training first.", 1.5);
+        const nextReq = getNextPacketRequirement();
+        setNotice(
+          `Deployment locked. Complete phase ${resources.trainingPhase + 1} (need ${nextReq} packets).`,
+          1.8
+        );
       }
       return;
     }
@@ -375,6 +437,7 @@
       reason,
       score: state.resources.score,
       training: state.resources.training,
+      accuracy: state.resources.accuracy,
       remainingTime: Math.max(0, state.resources.timeLeft),
     };
     state.ui.resultIndex = 0;
@@ -793,8 +856,8 @@
       const shard = state.shards[i];
       shard.pulse += dt * 3.6;
       if (dist(player, shard) <= player.r + shard.r + 4) {
-        state.resources.data += 1;
-        state.resources.score += 6;
+        state.resources.data += 4;
+        state.resources.score += 8;
         state.shards.splice(i, 1);
       }
     }
@@ -846,7 +909,11 @@
     }
 
     if (state.resources.training >= 100 && nearStation(state.stations.gate, 52)) {
-      setNotice("Press E or B to deploy your trained agent.", 0.9);
+      if (state.resources.accuracy < 50) {
+        setNotice(`Warning: accuracy ${Math.round(state.resources.accuracy)}% below 50% deploy threshold.`, 1.2);
+      } else {
+        setNotice("Press E or B to deploy your trained agent.", 0.9);
+      }
     }
 
     if (state.resources.timeLeft <= 0) {
@@ -1076,16 +1143,23 @@
     ctx.font = "500 12px Space Grotesk";
     ctx.fillText(`Learn: ${model.microLesson}`, 42, 90);
 
+    const phaseNow = Math.min(resources.trainingPhase + 1, TRAINING_PACKET_REQUIREMENTS.length);
+    const nextReq = getNextPacketRequirement();
+    const phaseChip = nextReq > 0
+      ? `Phase ${phaseNow}/3 Need ${nextReq}`
+      : "Phase 3/3 Done";
+
     const chips = [
       `Data ${resources.data}`,
       `Compute ${Math.round(resources.compute)}`,
       `Alignment ${Math.round(resources.alignment)}`,
-      `Training ${Math.round(resources.training)}%`,
+      `Train ${Math.round(resources.training)}% | Acc ${Math.round(resources.accuracy)}%`,
+      phaseChip,
       `Time ${Math.ceil(resources.timeLeft)}s`,
       `Score ${Math.round(resources.score)}`,
     ];
 
-    let chipX = 350;
+    let chipX = 320;
     for (const chip of chips) {
       const w = ctx.measureText(chip).width + 28;
       ctx.fillStyle = "rgba(76, 173, 212, 0.28)";
@@ -1118,12 +1192,22 @@
   function drawGameplay() {
     drawBackground();
 
-    drawStation(state.stations.data, "#6bd6ff", "Synthesize data (E/B)", nearStation(state.stations.data, 34));
-    drawStation(state.stations.cluster, "#8cffb0", "Run training cycle (E/B)", nearStation(state.stations.cluster, 36));
+    const nextReq = getNextPacketRequirement();
+    const clusterSubtitle = nextReq > 0
+      ? `Phase ${state.resources.trainingPhase + 1}: need ${nextReq}+ packets (E/B)`
+      : "Core training complete";
+    const gateSubtitle = state.resources.training < 100
+      ? "Locked until training is complete"
+      : state.resources.accuracy < 50
+        ? `Accuracy ${Math.round(state.resources.accuracy)}% < 50% (deploy fails)`
+        : "Deploy now (E/B)";
+
+    drawStation(state.stations.data, "#6bd6ff", "Synthesize +10 packets (E/B)", nearStation(state.stations.data, 34));
+    drawStation(state.stations.cluster, "#8cffb0", clusterSubtitle, nearStation(state.stations.cluster, 36));
     drawStation(
       state.stations.gate,
       "#ffd17e",
-      state.resources.training >= 100 ? "Deploy now (E/B)" : "Locked until training is complete",
+      gateSubtitle,
       nearStation(state.stations.gate, 36)
     );
 
@@ -1313,9 +1397,10 @@
       "Flow:",
       "1. Collect floating data shards in the arena.",
       "2. Visit the Data Lake station to synthesize extra data from compute.",
-      "3. Train at the central cluster to raise model quality to 100%.",
-      "4. Eliminate drift anomalies before they damage alignment.",
-      "5. Reach the Deployment Gate and launch before the timer expires.",
+      "3. Train at cluster in phases: minimum 20 packets, then 30, then 40.",
+      "4. Minimum packets can finish training, but accuracy stays low.",
+      "5. Reach at least 50% accuracy before deployment or launch fails.",
+      "6. Eliminate drift anomalies before they damage alignment.",
       "",
       "Concept tie-in:",
       "- Data, compute, and alignment tradeoffs mirror real ML production pressure.",
@@ -1381,6 +1466,7 @@
       reason: "Run complete.",
       score: 0,
       training: 0,
+      accuracy: 0,
       remainingTime: 0,
     };
 
@@ -1407,8 +1493,9 @@
     ctx.fillStyle = "#bfe3f5";
     ctx.font = "500 21px Space Grotesk";
     ctx.fillText(`Score: ${Math.round(result.score)}`, BASE_WIDTH / 2, 304);
-    ctx.fillText(`Training: ${Math.round(result.training)}%`, BASE_WIDTH / 2, 338);
-    ctx.fillText(`Time Remaining: ${Math.ceil(result.remainingTime)}s`, BASE_WIDTH / 2, 372);
+    ctx.fillText(`Accuracy: ${Math.round(result.accuracy)}%`, BASE_WIDTH / 2, 338);
+    ctx.fillText(`Training: ${Math.round(result.training)}%`, BASE_WIDTH / 2, 372);
+    ctx.fillText(`Time Remaining: ${Math.ceil(result.remainingTime)}s`, BASE_WIDTH / 2, 406);
 
     const buttons = getResultButtons();
     state.ui.activeButtons = buttons;
@@ -1460,13 +1547,20 @@
       compute: 0,
       alignment: 0,
       training: 0,
+      trainingPhase: 0,
+      accuracy: 0,
       score: 0,
       timeLeft: 0,
       deployed: false,
     };
 
-    let objective = "Collect data, train at cluster, defend against anomalies";
-    if (resources.training >= 100) {
+    let objective = "Collect data packets and train while defending the cluster";
+    const nextReq = getNextPacketRequirement();
+    if (resources.training < 100) {
+      objective = `Complete phase ${resources.trainingPhase + 1}: gather at least ${nextReq} packets`;
+    } else if (resources.accuracy < 50) {
+      objective = `Accuracy ${Math.round(resources.accuracy)}% below 50% threshold; deployment fails`;
+    } else {
       objective = "Move to Deployment Gate and press E/B";
     }
     if (state.mode === "result") {
@@ -1488,6 +1582,7 @@
         parameter_scale: getModel().params,
         educational_note: getModel().lesson,
       },
+      deploy_accuracy_threshold: 50,
       objective,
       player: state.player
         ? {
@@ -1507,6 +1602,9 @@
         compute: Math.round(resources.compute),
         alignment: Math.round(resources.alignment),
         training: Math.round(resources.training),
+        training_phase: resources.trainingPhase,
+        next_phase_packets: nextReq,
+        accuracy: Math.round(resources.accuracy),
         score: Math.round(resources.score),
         time_left_seconds: Number(resources.timeLeft.toFixed(1)),
       },
