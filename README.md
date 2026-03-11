@@ -2,6 +2,10 @@
 
 Playable educational web game about AI model operations.
 
+## Live Deployment
+- Production: https://agent-forge-model-training-game.vercel.app
+- Latest preview: https://agent-forge-model-training-game-7dfn7jual.vercel.app
+
 ## What You Learn
 - Model families used in modern AI ecosystems (Llama, Qwen, Mistral)
 - Data vs compute vs alignment tradeoffs
