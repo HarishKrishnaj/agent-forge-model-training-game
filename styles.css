@@ -1,10 +1,10 @@
 :root {
   color-scheme: only light;
-  --page-top: #d8f0ff;
-  --page-mid: #ecf7ff;
-  --page-bottom: #f6fff6;
-  --shell-border: #9ac7ea;
-  --shell-shadow: 0 20px 65px rgba(36, 94, 132, 0.26);
+  --page-top: #cce9fb;
+  --page-mid: #e6f4ff;
+  --page-bottom: #eefbf5;
+  --shell-border: #88c8f2;
+  --shell-shadow: 0 26px 80px rgba(22, 74, 112, 0.28);
 }
 
 * {
@@ -23,9 +23,10 @@ body {
   place-items: center;
   font-family: "Space Grotesk", sans-serif;
   background:
-    radial-gradient(circle at 20% 15%, rgba(108, 187, 255, 0.36), transparent 45%),
-    radial-gradient(circle at 82% 86%, rgba(117, 224, 167, 0.3), transparent 42%),
-    linear-gradient(170deg, var(--page-top), var(--page-mid) 55%, var(--page-bottom));
+    radial-gradient(circle at 18% 14%, rgba(88, 175, 255, 0.34), transparent 44%),
+    radial-gradient(circle at 74% 18%, rgba(255, 197, 131, 0.2), transparent 34%),
+    radial-gradient(circle at 82% 84%, rgba(117, 224, 167, 0.28), transparent 40%),
+    linear-gradient(170deg, var(--page-top), var(--page-mid) 52%, var(--page-bottom));
   overflow: hidden;
 }
 
@@ -37,6 +38,7 @@ body {
   overflow: hidden;
   box-shadow: var(--shell-shadow);
   background: #0a2130;
+  position: relative;
 }
 
 #game-canvas {

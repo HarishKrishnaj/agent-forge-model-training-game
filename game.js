@@ -51,8 +51,70 @@
     },
   ];
 
-  const TRAINING_PACKET_REQUIREMENTS = [20, 30, 40];
-  const TRAINING_PHASE_PROGRESS = [34, 33, 33];
+  const ACTIVATION_OPTIONS = [
+    {
+      id: "relu",
+      label: "ReLU",
+      lesson: "Fast and sparse. Best for clean classification-style feature stacks.",
+    },
+    {
+      id: "gelu",
+      label: "GELU",
+      lesson: "Smooth transformer-friendly activations. Strong for language and coding tasks.",
+    },
+    {
+      id: "silu",
+      label: "SiLU",
+      lesson: "Self-gated smooth behavior. Useful for routing-heavy agent systems.",
+    },
+    {
+      id: "tanh",
+      label: "Tanh",
+      lesson: "Bounded positive and negative range. Safer for stable control or regression heads.",
+    },
+  ];
+
+  const TASK_PROFILES = [
+    {
+      id: "sensor_classifier",
+      label: "Sensor Drift Classifier",
+      requirement: "The model needs sparse feature activation and fast tabular decisions.",
+      clue: "Look for the activation that keeps only the useful positive signals alive.",
+      recommendedActivation: "relu",
+      scores: { relu: 22, gelu: 10, silu: 6, tanh: -6 },
+    },
+    {
+      id: "coding_assistant",
+      label: "Coding Copilot Fine-Tune",
+      requirement: "The task needs smooth token transitions and transformer-friendly gradients.",
+      clue: "Language and code generally prefer smooth activations over hard clipping.",
+      recommendedActivation: "gelu",
+      scores: { relu: 4, gelu: 22, silu: 12, tanh: -4 },
+    },
+    {
+      id: "tool_router",
+      label: "Agent Tool Router",
+      requirement: "The policy needs self-gated behavior to route requests across tools efficiently.",
+      clue: "A gated activation helps when the network must softly decide where traffic should go.",
+      recommendedActivation: "silu",
+      scores: { relu: 7, gelu: 12, silu: 22, tanh: -3 },
+    },
+    {
+      id: "risk_regressor",
+      label: "Risk Control Head",
+      requirement: "Outputs must stay bounded above and below zero for stable scoring.",
+      clue: "Choose the activation that naturally keeps values within a signed range.",
+      recommendedActivation: "tanh",
+      scores: { relu: -8, gelu: 6, silu: 4, tanh: 22 },
+    },
+  ];
+
+  const STAGE_ORDER = ["collection", "training", "deployment"];
+  const STAGE_LABELS = {
+    collection: "Level 1: Data Collection",
+    training: "Level 2: Training Configuration",
+    deployment: "Level 3: Deployment Rollout",
+  };
 
   const DIFFICULTY_OPTIONS = [
     {
@@ -61,7 +123,10 @@
       anomalySpeed: 70,
       alignmentHit: 12,
       timeLimit: 230,
-      shardTarget: 8,
+      collectionGoal: 12,
+      dropInterval: 0.72,
+      trainingThreatInterval: 2.35,
+      deploymentThreatInterval: 1.95,
     },
     {
       label: "Standard",
@@ -69,7 +134,10 @@
       anomalySpeed: 88,
       alignmentHit: 18,
       timeLimit: 180,
-      shardTarget: 6,
+      collectionGoal: 14,
+      dropInterval: 0.62,
+      trainingThreatInterval: 1.8,
+      deploymentThreatInterval: 1.45,
     },
     {
       label: "Research Ops",
@@ -77,7 +145,10 @@
       anomalySpeed: 106,
       alignmentHit: 24,
       timeLimit: 145,
-      shardTarget: 5,
+      collectionGoal: 20,
+      dropInterval: 0.54,
+      trainingThreatInterval: 1.3,
+      deploymentThreatInterval: 1.08,
     },
   ];
 
@@ -108,7 +179,9 @@
       modelIndex: 1,
       difficultyIndex: 1,
       squadIndex: 1,
+      soundEnabled: true,
     },
+    run: null,
     player: null,
     resources: null,
     stations: {
@@ -119,10 +192,15 @@
     shards: [],
     anomalies: [],
     projectiles: [],
+    effects: [],
     spawnTimer: 0,
     shardTimer: 0,
     result: null,
     timeElapsed: 0,
+    audio: {
+      context: null,
+      unlocked: false,
+    },
     input: {
       keysDown: new Set(),
       keyPressed: new Set(),
@@ -140,6 +218,10 @@
 
   function clamp(v, min, max) {
     return Math.max(min, Math.min(max, v));
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
   }
 
   function length(x, y) {
@@ -162,13 +244,346 @@
     return SQUAD_OPTIONS[state.settings.squadIndex];
   }
 
-  function getNextPacketRequirement() {
-    const resources = state.resources;
-    if (!resources) {
-      return TRAINING_PACKET_REQUIREMENTS[0];
+  function pickTaskProfile() {
+    return TASK_PROFILES[Math.floor(Math.random() * TASK_PROFILES.length)];
+  }
+
+  function getStageId() {
+    return state.run ? state.run.stage : "collection";
+  }
+
+  function getStageLabel() {
+    return STAGE_LABELS[getStageId()] || STAGE_LABELS.collection;
+  }
+
+  function getSelectedActivation() {
+    if (!state.run || !state.run.selectedActivation) {
+      return null;
     }
-    const idx = resources.trainingPhase || 0;
-    return TRAINING_PACKET_REQUIREMENTS[idx] || 0;
+    return ACTIVATION_OPTIONS.find((option) => option.id === state.run.selectedActivation) || null;
+  }
+
+  function getStageNodes() {
+    const stage = getStageId();
+    if (stage === "collection") {
+      return {
+        source: { x: 640, y: 120, r: 66, name: "Source Stream" },
+        relay: { x: 1080, y: 556, r: 72, name: "Collection Relay" },
+      };
+    }
+    if (stage === "training") {
+      return {
+        upload: { x: 258, y: 548, r: 70, name: "Upload Port" },
+        core: { x: 708, y: 364, r: 96, name: "Training Core" },
+        console: { x: 1068, y: 358, r: 72, name: "Activation Rack" },
+      };
+    }
+    return {
+      console: { x: 252, y: 548, r: 70, name: "Rollout Console" },
+      gate: { x: 1008, y: 378, r: 96, name: "Serve Gateway" },
+    };
+  }
+
+  function getActivationButtons() {
+    const x = 948;
+    const y = 224;
+    const w = 264;
+    const h = 64;
+    const gap = 16;
+    return ACTIVATION_OPTIONS.map((option, idx) => ({
+      ...option,
+      label: `${idx + 1}. ${option.label}`,
+      rect: { x, y: y + idx * (h + gap), w, h },
+      id: `activation_${option.id}`,
+    }));
+  }
+
+  function getCollectionGoal() {
+    if (state.run && state.run.collectionGoal) {
+      return state.run.collectionGoal;
+    }
+    return getDifficulty().collectionGoal;
+  }
+
+  function getTrainingBatchSize() {
+    return 4 + getSquadSize();
+  }
+
+  function getActivationScore() {
+    const run = state.run;
+    if (!run || !run.trainingTask) {
+      return 0;
+    }
+    if (!run.selectedActivation) {
+      return -14;
+    }
+    return run.trainingTask.scores[run.selectedActivation] ?? -10;
+  }
+
+  function computeProjectedAccuracy() {
+    if (!state.run) {
+      return 0;
+    }
+    const run = state.run;
+    const resources = state.resources;
+    const model = getModel();
+    const base = 12;
+    const dataScore = Math.min(28, (run.trainingDataBudget || 0) * 0.9);
+    const defenseScore = clamp((resources.alignment - 35) * 0.25, 0, 16);
+    const modelScore = model.accuracyBias * 4;
+    const difficultyPenalty = state.settings.difficultyIndex * 4;
+    const threatPenalty = (run.trainingHits || 0) * 3;
+    return clamp(
+      base + dataScore + defenseScore + modelScore + getActivationScore() - difficultyPenalty - threatPenalty,
+      8,
+      96
+    );
+  }
+
+  function getObjectiveText() {
+    const resources = state.resources;
+    const run = state.run;
+    if (!resources || !run) {
+      return "Collect clean data, configure training, and defend deployment.";
+    }
+
+    if (state.mode === "result") {
+      return state.result && state.result.victory
+        ? "Run complete: deployment successful"
+        : "Run complete: iterate on data quality, activation choice, and defense.";
+    }
+
+    if (run.stage === "collection") {
+      return `Catch at least ${run.collectionGoal} clean packets, then relay them to training.`;
+    }
+    if (run.stage === "training") {
+      if (!run.selectedActivation) {
+        return "Read the task card, choose an activation function, and upload the dataset.";
+      }
+      return `Upload remaining packets into the core. Current activation: ${getSelectedActivation().label}.`;
+    }
+    if (!run.deploymentActive) {
+      return resources.accuracy < 50
+        ? `Accuracy ${Math.round(resources.accuracy)}% is below the 50% launch threshold.`
+        : "Start rollout at the serve gateway and defend against deployment attacks.";
+    }
+    return `Hold the gateway until rollout reaches 100%.`;
+  }
+
+  function getLearningPrompt() {
+    const resources = state.resources;
+    const run = state.run;
+    if (!resources || !run) {
+      return "Three levels teach how clean data, activation choices, and deployment defense shape model quality.";
+    }
+    if (state.mode === "result" && state.result && state.result.lesson) {
+      return state.result.lesson;
+    }
+    if (run.stage === "collection") {
+      return "Level 1: clean packets fall from the source. Scrambler attacks corrupt samples before they become training data.";
+    }
+    if (run.stage === "training") {
+      if (!run.selectedActivation) {
+        return `Task card: ${run.trainingTask.requirement} Choose the activation that best matches that requirement.`;
+      }
+      const selected = getSelectedActivation();
+      const isBest = selected && selected.id === run.trainingTask.recommendedActivation;
+      return isBest
+        ? `${selected.label} matches the task well. Uploading now should maximize accuracy if you protect the core.`
+        : `${selected.label} is risky for this task. You can still upload, but final accuracy will likely suffer.`;
+    }
+    if (!run.deploymentActive) {
+      return resources.accuracy < 50
+        ? "The model is underfit. Even a defended rollout will fail below 50% accuracy."
+        : "Deployment converts training quality into production value. Protect the serve gateway from injection waves.";
+    }
+    return "Prompt-injection and latency spikes can ruin deployment even after good training. Hold the line until rollout finishes.";
+  }
+
+  function ensureAudioContext() {
+    if (!state.settings.soundEnabled) {
+      return null;
+    }
+    if (!state.audio.context) {
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) {
+        state.audio.unlocked = true;
+        return null;
+      }
+      state.audio.context = new AudioCtor();
+    }
+    return state.audio.context;
+  }
+
+  function unlockAudio() {
+    const audio = ensureAudioContext();
+    if (!audio) {
+      return;
+    }
+    if (audio.state === "suspended") {
+      audio.resume().catch(() => {});
+    }
+    state.audio.unlocked = true;
+  }
+
+  function playSound(name) {
+    if (!state.settings.soundEnabled) {
+      return;
+    }
+
+    const audio = ensureAudioContext();
+    if (!audio || !state.audio.unlocked) {
+      return;
+    }
+
+    const now = audio.currentTime + 0.01;
+    const master = audio.createGain();
+    master.gain.value = 0.05;
+    master.connect(audio.destination);
+
+    const sequence = [];
+    if (name === "shoot") {
+      sequence.push([690, 0.04, "square"], [420, 0.06, "triangle"]);
+    } else if (name === "pickup") {
+      sequence.push([620, 0.05, "triangle"], [840, 0.08, "sine"]);
+    } else if (name === "train") {
+      sequence.push([320, 0.08, "triangle"], [440, 0.08, "triangle"], [560, 0.1, "sine"]);
+    } else if (name === "hit") {
+      sequence.push([240, 0.05, "sawtooth"], [180, 0.08, "square"]);
+    } else if (name === "damage") {
+      sequence.push([180, 0.1, "sawtooth"], [130, 0.12, "triangle"]);
+    } else if (name === "fail") {
+      sequence.push([220, 0.11, "sawtooth"], [170, 0.11, "sawtooth"], [110, 0.15, "triangle"]);
+    } else if (name === "deploy") {
+      sequence.push([420, 0.08, "triangle"], [620, 0.08, "triangle"], [920, 0.16, "sine"]);
+    } else if (name === "warning") {
+      sequence.push([520, 0.06, "square"], [520, 0.06, "square"]);
+    } else {
+      sequence.push([480, 0.08, "sine"]);
+    }
+
+    let cursor = now;
+    for (const [freq, duration, type] of sequence) {
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, cursor);
+      gain.gain.setValueAtTime(0.0001, cursor);
+      gain.gain.exponentialRampToValueAtTime(0.4, cursor + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, cursor + duration);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(cursor);
+      osc.stop(cursor + duration + 0.02);
+      cursor += duration * 0.8;
+    }
+
+    master.gain.setValueAtTime(0.06, now);
+    master.gain.exponentialRampToValueAtTime(0.0001, cursor + 0.1);
+  }
+
+  function emitParticles(x, y, color, count, speedMin, speedMax, life, size) {
+    for (let i = 0; i < count; i++) {
+      const angle = rand(0, Math.PI * 2);
+      const speed = rand(speedMin, speedMax);
+      state.effects.push({
+        kind: "particle",
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life,
+        maxLife: life,
+        size: rand(size * 0.6, size * 1.3),
+        color,
+      });
+    }
+  }
+
+  function emitRing(x, y, color, startRadius, endRadius, life) {
+    state.effects.push({
+      kind: "ring",
+      x,
+      y,
+      startRadius,
+      endRadius,
+      radius: startRadius,
+      life,
+      maxLife: life,
+      color,
+    });
+  }
+
+  function updateEffects(dt) {
+    for (let i = state.effects.length - 1; i >= 0; i--) {
+      const effect = state.effects[i];
+      effect.life -= dt;
+      if (effect.life <= 0) {
+        state.effects.splice(i, 1);
+        continue;
+      }
+      if (effect.kind === "particle") {
+        effect.x += effect.vx * dt;
+        effect.y += effect.vy * dt;
+        effect.vx *= 0.98;
+        effect.vy *= 0.98;
+      } else if (effect.kind === "ring") {
+        const progress = 1 - effect.life / effect.maxLife;
+        effect.radius = lerp(effect.startRadius, effect.endRadius, progress);
+      }
+    }
+  }
+
+  function roundedRectPath(x, y, w, h, r) {
+    const radius = Math.min(r, w * 0.5, h * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+  }
+
+  function drawPanel(x, y, w, h, fillStyle, strokeStyle, radius = 20, lineWidth = 2) {
+    ctx.save();
+    roundedRectPath(x, y, w, h, radius);
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+    if (strokeStyle) {
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawWrappedText(text, x, y, maxWidth, lineHeight, align = "left") {
+    const words = text.split(" ");
+    const lines = [];
+    let current = "";
+    for (const word of words) {
+      const next = current ? `${current} ${word}` : word;
+      if (ctx.measureText(next).width > maxWidth && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = next;
+      }
+    }
+    if (current) {
+      lines.push(current);
+    }
+
+    ctx.textAlign = align;
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], x, y + i * lineHeight);
+    }
+    return lines.length;
   }
 
   function isKeyDown(...codes) {
@@ -227,10 +642,10 @@
     state.world.scaleY = rect.height / BASE_HEIGHT;
   }
 
-  function createPlayer() {
+  function createPlayer(x = 120, y = 390) {
     return {
-      x: 120,
-      y: 390,
+      x,
+      y,
       vx: 0,
       vy: 0,
       r: 17,
@@ -240,33 +655,94 @@
     };
   }
 
+  function selectActivation(id, silent = false) {
+    if (!state.run || state.run.stage !== "training") {
+      return;
+    }
+    state.run.selectedActivation = id;
+    if (!silent) {
+      const option = getSelectedActivation();
+      playSound("pickup");
+      setNotice(`${option.label} selected. ${option.lesson}`, 2.2);
+    }
+  }
+
+  function beginStage(stage) {
+    const difficulty = getDifficulty();
+    const run = state.run;
+    run.stage = stage;
+
+    state.shards = [];
+    state.anomalies = [];
+    state.projectiles = [];
+    state.effects = [];
+    state.spawnTimer = difficulty.spawnInterval;
+    state.shardTimer = difficulty.dropInterval;
+
+    if (stage === "collection") {
+      state.player = createPlayer(640, 588);
+      run.collectionCaptured = 0;
+      run.collectionCorrupted = 0;
+      run.collectionGoal = difficulty.collectionGoal;
+      setNotice(`Level 1: catch ${run.collectionGoal}+ clean packets, then move to the relay.`, 2.6);
+      return;
+    }
+
+    if (stage === "training") {
+      state.player = createPlayer(312, 560);
+      run.trainingDataBudget = Math.max(run.collectionGoal, state.resources.data);
+      run.uploadedPackets = 0;
+      run.trainingHits = 0;
+      state.resources.training = 0;
+      state.resources.accuracy = 0;
+      state.spawnTimer = difficulty.trainingThreatInterval;
+      state.shardTimer = 99;
+      setNotice(
+        `Level 2: choose an activation for ${run.trainingTask.label}, then upload ${run.trainingDataBudget} packets.`,
+        2.8
+      );
+      return;
+    }
+
+    state.player = createPlayer(920, 380);
+    run.deploymentActive = false;
+    run.deployHits = 0;
+    run.deployProgress = 0;
+    state.spawnTimer = difficulty.deploymentThreatInterval;
+    state.shardTimer = 99;
+    setNotice("Level 3: start rollout at the gateway and defend deployment traffic.", 2.6);
+  }
+
   function resetRun() {
     const difficulty = getDifficulty();
-    state.player = createPlayer();
     state.resources = {
-      data: 10,
-      compute: 62,
+      data: 0,
+      compute: 72,
       alignment: 100,
       training: 0,
-      trainingPhase: 0,
       accuracy: 0,
       score: 0,
       timeLeft: difficulty.timeLimit,
       deployed: false,
+      stageIndex: 0,
     };
-    state.shards = [];
-    state.anomalies = [];
-    state.projectiles = [];
-    state.spawnTimer = difficulty.spawnInterval * 0.65;
-    state.shardTimer = 1.2;
     state.timeElapsed = 0;
-    state.ui.notice = "Collect data packets for phase 1 training (need 20).";
-    state.ui.noticeTimer = 2.4;
     state.result = null;
-
-    for (let i = 0; i < 6; i++) {
-      spawnShard();
-    }
+    state.run = {
+      stage: "collection",
+      collectionGoal: difficulty.collectionGoal,
+      collectionCaptured: 0,
+      collectionCorrupted: 0,
+      trainingTask: pickTaskProfile(),
+      selectedActivation: null,
+      trainingDataBudget: 0,
+      uploadedPackets: 0,
+      trainingHits: 0,
+      deployProgress: 0,
+      deploymentActive: false,
+      deployHits: 0,
+    };
+    beginStage("collection");
   }
 
   function startRun() {
@@ -275,24 +751,63 @@
   }
 
   function spawnShard() {
+    const stage = getStageId();
+    if (stage !== "collection") {
+      return;
+    }
+    const nodes = getStageNodes();
     state.shards.push({
-      x: rand(150, BASE_WIDTH - 140),
-      y: rand(150, BASE_HEIGHT - 120),
-      r: 10,
+      type: "drop",
+      x: clamp(state.player.x + rand(-42, 42), nodes.source.x - 170, nodes.source.x + 170),
+      y: nodes.source.y + 24,
+      vx: rand(-22, 22),
+      vy: rand(118, 156),
+      r: 12,
       pulse: rand(0, Math.PI * 2),
+      tilt: rand(-0.3, 0.3),
+      clean: true,
     });
   }
 
   function spawnAnomaly() {
     const difficulty = getDifficulty();
-    const spawnTop = Math.random() < 0.5;
+    const stage = getStageId();
+    if (stage === "collection") {
+      const fromLeft = Math.random() < 0.5;
+      state.anomalies.push({
+        type: "scrambler",
+        x: fromLeft ? 92 : BASE_WIDTH - 92,
+        y: rand(180, 470),
+        r: 17,
+        hp: 1,
+        speed: difficulty.anomalySpeed * rand(0.88, 1.12),
+        wobble: rand(0, Math.PI * 2),
+        hue: rand(0, 1),
+      });
+      return;
+    }
+    if (stage === "training") {
+      state.anomalies.push({
+        type: "gradient_spike",
+        x: rand(220, BASE_WIDTH - 140),
+        y: 112,
+        r: 18,
+        hp: 1,
+        speed: difficulty.anomalySpeed * rand(0.9, 1.16),
+        wobble: rand(0, Math.PI * 2),
+        hue: rand(0, 1),
+      });
+      return;
+    }
     state.anomalies.push({
-      x: spawnTop ? rand(180, BASE_WIDTH - 120) : BASE_WIDTH - 80,
-      y: spawnTop ? 90 : rand(120, BASE_HEIGHT - 100),
-      r: 16,
+      type: "injection_wave",
+      x: rand(160, 420),
+      y: rand(140, BASE_HEIGHT - 120),
+      r: 18,
       hp: 1,
-      speed: difficulty.anomalySpeed * rand(0.85, 1.15),
+      speed: difficulty.anomalySpeed * rand(0.95, 1.2),
       wobble: rand(0, Math.PI * 2),
+      hue: rand(0, 1),
     });
   }
 
@@ -317,11 +832,15 @@
       vy: ny * model.projectileSpeed,
       r: 5,
       ttl: 1.2,
+      trail: [],
+      spin: rand(-1, 1),
     });
 
     player.facingX = nx;
     player.facingY = ny;
     player.cooldown = Math.max(0.09, 0.29 - squad * 0.035);
+    emitParticles(player.x + nx * 18, player.y + ny * 18, "255,220,120", 5, 40, 120, 0.26, 4);
+    playSound("shoot");
   }
 
   function nearStation(station, range = 26) {
@@ -329,106 +848,107 @@
   }
 
   function executeInteraction() {
-    const model = getModel();
+    const run = state.run;
     const resources = state.resources;
-    const dataStation = state.stations.data;
-    const cluster = state.stations.cluster;
-    const gate = state.stations.gate;
+    const nodes = getStageNodes();
 
-    if (nearStation(dataStation, 34)) {
-      if (resources.compute >= 9) {
-        resources.compute = clamp(resources.compute - 9, 0, 100);
-        resources.data += 10;
-        resources.score += 8;
-        setNotice("Synthetic data batch +10 generated.", 1.4);
-      } else {
-        setNotice("Need 9 compute to mint data.", 1.4);
+    if (run.stage === "collection") {
+      if (nearStation(nodes.relay, 34)) {
+        if (resources.data >= run.collectionGoal) {
+          resources.score += 25;
+          emitRing(nodes.relay.x, nodes.relay.y, "107,214,255", 26, 110, 0.5);
+          emitParticles(nodes.relay.x, nodes.relay.y, "107,214,255", 18, 40, 180, 0.55, 5);
+          playSound("train");
+          resources.stageIndex = 1;
+          beginStage("training");
+        } else {
+          playSound("warning");
+          setNotice(`Need ${run.collectionGoal - resources.data} more clean packets before relay upload.`, 1.8);
+        }
+        return;
       }
+      playSound("warning");
+      setNotice("Catch packets from the source stream and move to the relay when the dataset is large enough.", 1.8);
       return;
     }
 
-    if (nearStation(cluster, 36)) {
-      if (resources.trainingPhase >= TRAINING_PACKET_REQUIREMENTS.length) {
-        setNotice("Core training phases complete. Move to deployment gate.", 1.5);
+    if (run.stage === "training") {
+      if (nearStation(nodes.console, 34)) {
+        const currentIndex = Math.max(
+          0,
+          ACTIVATION_OPTIONS.findIndex((option) => option.id === run.selectedActivation)
+        );
+        const next = ACTIVATION_OPTIONS[(currentIndex + 1) % ACTIVATION_OPTIONS.length];
+        selectActivation(next.id);
         return;
       }
 
-      const phaseIdx = resources.trainingPhase;
-      const requiredPackets = TRAINING_PACKET_REQUIREMENTS[phaseIdx];
+      if (nearStation(nodes.upload, 40)) {
+        if (!run.selectedActivation) {
+          playSound("warning");
+          setNotice("Choose an activation function before uploading the dataset.", 1.8);
+          return;
+        }
+        if (resources.data <= 0) {
+          playSound("warning");
+          setNotice("No buffered packets remain. Protect the core until the module finalizes.", 1.6);
+          return;
+        }
+        const uploadCost = Math.max(8, getModel().computeCost - 6);
+        if (resources.compute < uploadCost) {
+          playSound("warning");
+          setNotice(`Need ${uploadCost} compute to upload the next training batch.`, 1.6);
+          return;
+        }
 
-      if (resources.data < requiredPackets) {
-        setNotice(`Need at least ${requiredPackets} data packets for phase ${phaseIdx + 1}.`, 1.7);
-        return;
-      }
-      if (resources.compute < model.computeCost) {
-        setNotice(`Need ${model.computeCost} compute for training cycle.`, 1.5);
-        return;
-      }
+        const batch = Math.min(getTrainingBatchSize(), resources.data);
+        resources.data -= batch;
+        resources.compute = clamp(resources.compute - uploadCost, 0, 100);
+        run.uploadedPackets += batch;
+        resources.training = clamp((run.uploadedPackets / Math.max(1, run.trainingDataBudget)) * 100, 0, 100);
+        const projectedAccuracy = computeProjectedAccuracy();
+        resources.accuracy = Math.round(projectedAccuracy * (resources.training / 100));
+        resources.score += 10 + batch;
 
-      const bonusPacketsUsed = Math.min(20, Math.max(0, resources.data - requiredPackets));
-      const packetsUsed = requiredPackets + bonusPacketsUsed;
-      resources.data -= packetsUsed;
-      resources.compute = clamp(resources.compute - model.computeCost, 0, 100);
+        emitRing(nodes.core.x, nodes.core.y, "140,255,176", 24, 118, 0.48);
+        emitParticles(nodes.core.x, nodes.core.y, "160,255,210", 18, 44, 180, 0.55, 5);
+        playSound("train");
 
-      const progressGain = TRAINING_PHASE_PROGRESS[phaseIdx];
-      resources.training = clamp(resources.training + progressGain, 0, 100);
-      resources.trainingPhase = clamp(resources.trainingPhase + 1, 0, TRAINING_PACKET_REQUIREMENTS.length);
-
-      const baseAccuracyGain = 10 + model.accuracyBias + phaseIdx * 2;
-      const bonusAccuracyGain = bonusPacketsUsed * 0.7;
-      const accuracyGain = baseAccuracyGain + bonusAccuracyGain;
-      resources.accuracy = clamp(resources.accuracy + accuracyGain, 0, 100);
-
-      resources.score += 20 + Math.round(accuracyGain) + bonusPacketsUsed;
-
-      if (resources.trainingPhase >= TRAINING_PACKET_REQUIREMENTS.length) {
-        if (resources.accuracy < 50) {
+        if (resources.training >= 100) {
+          resources.accuracy = Math.round(projectedAccuracy);
+          resources.stageIndex = 2;
+          beginStage("deployment");
+        } else {
           setNotice(
-            `Training complete but accuracy ${Math.round(resources.accuracy)}% is below deploy threshold.`,
+            `Uploaded ${batch} packets. Progress ${Math.round(resources.training)}%. Projected accuracy ${Math.round(projectedAccuracy)}%.`,
             2.2
           );
-        } else {
-          setNotice(`Training complete. Accuracy ${Math.round(resources.accuracy)}%. Deploy at gate.`, 2.2);
         }
-      } else {
-        const nextReq = getNextPacketRequirement();
-        if (bonusPacketsUsed === 0) {
-          setNotice(
-            `Phase ${phaseIdx + 1}: minimum packets used. Accuracy +${Math.round(accuracyGain)}%. Next phase needs ${nextReq}.`,
-            2.3
-          );
-        } else {
-          setNotice(
-            `Phase ${phaseIdx + 1}: used ${packetsUsed} packets (+${bonusPacketsUsed} bonus). Accuracy +${Math.round(accuracyGain)}%. Next needs ${nextReq}.`,
-            2.3
-          );
-        }
+        return;
       }
+
+      playSound("warning");
+      setNotice("Move to the upload port to feed the core, or use the activation rack to change functions.", 1.8);
       return;
     }
 
-    if (nearStation(gate, 34)) {
-      if (resources.training >= 100) {
-        resources.deployed = true;
-        if (resources.accuracy < 50) {
-          finishRun(false, `Deployment failed: accuracy ${Math.round(resources.accuracy)}% is below 50%.`);
-        } else {
-          finishRun(true, `Agent deployed with ${Math.round(resources.accuracy)}% accuracy.`);
-        }
-      } else {
-        const nextReq = getNextPacketRequirement();
-        setNotice(
-          `Deployment locked. Complete phase ${resources.trainingPhase + 1} (need ${nextReq} packets).`,
-          1.8
-        );
+    if (nearStation(nodes.gate, 36)) {
+      if (!run.deploymentActive) {
+        run.deploymentActive = true;
+        emitRing(nodes.gate.x, nodes.gate.y, "170,255,205", 30, 140, 0.5);
+        playSound("deploy");
+        setNotice("Rollout started. Hold the gateway until deployment reaches 100%.", 1.8);
+        return;
       }
+      setNotice("Rollout already active. Keep defending the serve gateway until the bar completes.", 1.4);
       return;
     }
 
-    setNotice("No station in range. Move closer.", 1.2);
+    playSound("warning");
+    setNotice("No interface node in range. Reposition and try again.", 1.2);
   }
 
-  function finishRun(victory, reason) {
+  function finishRun(victory, reason, lesson) {
     state.mode = "result";
     state.ui.notice = "";
     state.ui.noticeTimer = 0;
@@ -439,6 +959,7 @@
       training: state.resources.training,
       accuracy: state.resources.accuracy,
       remainingTime: Math.max(0, state.resources.timeLeft),
+      lesson,
     };
     state.ui.resultIndex = 0;
   }
@@ -513,9 +1034,9 @@
     ];
   }
 
-  function getResultButtons() {
+  function getResultButtons(startY = 426) {
     const x = BASE_WIDTH / 2 - 170;
-    const y = 426;
+    const y = startY;
     const w = 340;
     const h = 56;
     const gap = 14;
@@ -620,6 +1141,14 @@
     if (name === "squad") {
       state.settings.squadIndex =
         (state.settings.squadIndex + dir + SQUAD_OPTIONS.length) % SQUAD_OPTIONS.length;
+      return;
+    }
+    if (name === "sound") {
+      state.settings.soundEnabled = !state.settings.soundEnabled;
+      if (state.settings.soundEnabled) {
+        unlockAudio();
+        playSound("pickup");
+      }
     }
   }
 
@@ -642,6 +1171,11 @@
         value: `${getSquadSize()} operators`,
       },
       {
+        id: "sound",
+        label: "Soundscape",
+        value: state.settings.soundEnabled ? "Enabled" : "Muted",
+      },
+      {
         id: "back",
         label: "Back To Main Menu",
         value: "",
@@ -651,9 +1185,9 @@
 
   function settingsRowRects() {
     const x = BASE_WIDTH / 2 - 370;
-    const y = 240;
-    const h = 80;
-    const gap = 14;
+    const y = 220;
+    const h = 66;
+    const gap = 12;
     const w = 740;
     const rows = settingsRows();
     return rows.map((row, idx) => ({
@@ -761,6 +1295,302 @@
     maybeHandleButtonClick(buttons);
   }
 
+  function handleTrainingActivationHotkeys() {
+    if (!state.run || state.run.stage !== "training") {
+      return;
+    }
+    const bindings = ["Digit1", "Digit2", "Digit3", "Digit4"];
+    for (let i = 0; i < bindings.length; i++) {
+      if (consumePress(bindings[i])) {
+        selectActivation(ACTIVATION_OPTIONS[i].id);
+        return;
+      }
+    }
+  }
+
+  function handleTrainingActivationClick(click) {
+    if (!click || !state.run || state.run.stage !== "training") {
+      return false;
+    }
+    const buttons = getActivationButtons();
+    state.ui.activeButtons = buttons;
+    resolveHover(buttons);
+    for (const button of buttons) {
+      if (isPointInRect(click, button.rect)) {
+        selectActivation(button.id.replace("activation_", ""));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function updateProjectiles(dt) {
+    for (let i = state.projectiles.length - 1; i >= 0; i--) {
+      const projectile = state.projectiles[i];
+      projectile.trail.unshift({ x: projectile.x, y: projectile.y });
+      projectile.trail = projectile.trail.slice(0, 7);
+      projectile.x += projectile.vx * dt;
+      projectile.y += projectile.vy * dt;
+      projectile.ttl -= dt;
+      if (
+        projectile.ttl <= 0 ||
+        projectile.x < -20 ||
+        projectile.x > BASE_WIDTH + 20 ||
+        projectile.y < -20 ||
+        projectile.y > BASE_HEIGHT + 20
+      ) {
+        state.projectiles.splice(i, 1);
+      }
+    }
+  }
+
+  function resolveProjectileHits() {
+    for (let i = state.projectiles.length - 1; i >= 0; i--) {
+      const projectile = state.projectiles[i];
+      let hit = false;
+      for (let j = state.anomalies.length - 1; j >= 0; j--) {
+        const anomaly = state.anomalies[j];
+        if (dist(projectile, anomaly) <= projectile.r + anomaly.r + 1) {
+          state.resources.score += 12;
+          state.resources.compute = clamp(state.resources.compute + 3.5, 0, 100);
+          emitParticles(anomaly.x, anomaly.y, "255,200,120", 16, 40, 180, 0.45, 4);
+          emitRing(anomaly.x, anomaly.y, "255,200,120", 12, 72, 0.3);
+          playSound("hit");
+          state.anomalies.splice(j, 1);
+          hit = true;
+          break;
+        }
+      }
+      if (hit) {
+        state.projectiles.splice(i, 1);
+      }
+    }
+  }
+
+  function updateCollectionStage(dt, difficulty) {
+    const run = state.run;
+    const resources = state.resources;
+    const player = state.player;
+    const nodes = getStageNodes();
+
+    state.shardTimer -= dt;
+    if (state.shardTimer <= 0) {
+      spawnShard();
+      state.shardTimer = difficulty.dropInterval * rand(0.85, 1.18);
+    }
+
+    state.spawnTimer -= dt;
+    if (state.spawnTimer <= 0) {
+      spawnAnomaly();
+      state.spawnTimer = difficulty.spawnInterval * rand(0.72, 1.02);
+    }
+
+    for (let i = state.shards.length - 1; i >= 0; i--) {
+      const shard = state.shards[i];
+      shard.pulse += dt * 3.6;
+      const magnetDx = player.x - shard.x;
+      const magnetDy = player.y - shard.y;
+      const magnetDistance = length(magnetDx, magnetDy) || 1;
+      if (magnetDistance < 110) {
+        shard.vx += (magnetDx / magnetDistance) * 150 * dt;
+        shard.vy += (magnetDy / magnetDistance) * 180 * dt;
+      }
+      shard.x += shard.vx * dt;
+      shard.y += shard.vy * dt;
+      shard.vx *= 0.998;
+      if (dist(player, shard) <= player.r + shard.r + 4) {
+        resources.data += 1;
+        run.collectionCaptured += 1;
+        resources.score += 6;
+        emitParticles(shard.x, shard.y, "133,243,183", 12, 40, 160, 0.42, 5);
+        emitRing(shard.x, shard.y, "133,243,183", 10, 60, 0.35);
+        playSound("pickup");
+        state.shards.splice(i, 1);
+        continue;
+      }
+      if (shard.y > BASE_HEIGHT - 72) {
+        run.collectionCorrupted += 1;
+        state.shards.splice(i, 1);
+      }
+    }
+
+    for (let i = state.anomalies.length - 1; i >= 0; i--) {
+      const anomaly = state.anomalies[i];
+      anomaly.wobble += dt * 5.6;
+
+      let target = nodes.relay;
+      let bestDistance = Infinity;
+      for (const shard of state.shards) {
+        const d = dist(anomaly, shard);
+        if (d < bestDistance) {
+          bestDistance = d;
+          target = shard;
+        }
+      }
+
+      const dx = target.x - anomaly.x;
+      const dy = target.y - anomaly.y;
+      const d = length(dx, dy) || 1;
+      anomaly.x += (dx / d) * anomaly.speed * dt;
+      anomaly.y += (dy / d) * anomaly.speed * dt;
+
+      for (let j = state.shards.length - 1; j >= 0; j--) {
+        const shard = state.shards[j];
+        if (dist(anomaly, shard) <= anomaly.r + shard.r + 2) {
+          run.collectionCorrupted += 1;
+          resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.25, 0, 100);
+          emitParticles(shard.x, shard.y, "255,120,140", 14, 36, 150, 0.5, 4);
+          emitRing(shard.x, shard.y, "255,120,140", 12, 64, 0.3);
+          playSound("damage");
+          state.shards.splice(j, 1);
+          state.anomalies.splice(i, 1);
+          setNotice("A scrambler corrupted a falling packet.", 1.2);
+          break;
+        }
+      }
+      if (!state.anomalies[i]) {
+        continue;
+      }
+
+      if (dist(player, anomaly) <= player.r + anomaly.r + 2) {
+        resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.35, 0, 100);
+        emitParticles(player.x, player.y, "255,140,155", 14, 40, 130, 0.4, 4);
+        playSound("damage");
+        state.anomalies.splice(i, 1);
+        setNotice("A scrambler reached the guardian. Integrity reduced.", 1.2);
+      }
+    }
+
+    if (resources.data >= run.collectionGoal && nearStation(nodes.relay, 54)) {
+      setNotice("Dataset is large enough. Press E or B at the relay to enter training.", 1.1);
+    }
+  }
+
+  function updateTrainingStage(dt, difficulty) {
+    const run = state.run;
+    const resources = state.resources;
+    const player = state.player;
+    const nodes = getStageNodes();
+
+    state.spawnTimer -= dt;
+    if (state.spawnTimer <= 0) {
+      spawnAnomaly();
+      state.spawnTimer = difficulty.trainingThreatInterval * rand(0.8, 1.08);
+    }
+
+    for (let i = state.anomalies.length - 1; i >= 0; i--) {
+      const anomaly = state.anomalies[i];
+      anomaly.wobble += dt * 6.4;
+      const dx = nodes.core.x - anomaly.x;
+      const dy = nodes.core.y - anomaly.y;
+      const d = length(dx, dy) || 1;
+      anomaly.x += (dx / d) * anomaly.speed * dt;
+      anomaly.y += (dy / d) * anomaly.speed * dt;
+
+      if (d <= nodes.core.r * 0.72) {
+        run.trainingHits += 1;
+        resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.6, 0, 100);
+        const progressRatio = resources.training / 100;
+        resources.accuracy = Math.round(computeProjectedAccuracy() * progressRatio);
+        emitParticles(anomaly.x, anomaly.y, "255,120,140", 18, 40, 160, 0.55, 5);
+        emitRing(nodes.core.x, nodes.core.y, "255,120,140", 18, 124, 0.45);
+        playSound("damage");
+        state.anomalies.splice(i, 1);
+        setNotice("Gradient spike hit the core. Accuracy projection dropped.", 1.4);
+        continue;
+      }
+
+      if (dist(player, anomaly) <= player.r + anomaly.r + 2) {
+        resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.35, 0, 100);
+        emitParticles(player.x, player.y, "255,140,155", 14, 40, 130, 0.4, 4);
+        playSound("damage");
+        state.anomalies.splice(i, 1);
+        setNotice("Gradient spike clipped the guardian. Integrity reduced.", 1.2);
+      }
+    }
+
+    if (run.selectedActivation && resources.training < 100 && nearStation(nodes.upload, 54)) {
+      setNotice("Press E or B at the upload port to feed the training batches.", 0.9);
+    }
+  }
+
+  function updateDeploymentStage(dt, difficulty) {
+    const run = state.run;
+    const resources = state.resources;
+    const player = state.player;
+    const nodes = getStageNodes();
+
+    state.spawnTimer -= dt;
+    if (state.spawnTimer <= 0) {
+      spawnAnomaly();
+      state.spawnTimer = difficulty.deploymentThreatInterval * rand(0.8, 1.06);
+    }
+
+    if (run.deploymentActive) {
+      const rolloutRate = resources.accuracy >= 50 ? 23 : 16;
+      run.deployProgress = clamp(run.deployProgress + rolloutRate * dt, 0, 100);
+      if (run.deployProgress >= 100) {
+        resources.deployed = true;
+        const selected = getSelectedActivation();
+        const recommended = ACTIVATION_OPTIONS.find(
+          (option) => option.id === run.trainingTask.recommendedActivation
+        );
+        if (resources.accuracy < 50) {
+          finishRun(
+            false,
+            `Deployment failed: accuracy ${Math.round(resources.accuracy)}% is below 50%.`,
+            selected
+              ? `${run.trainingTask.label} wanted ${recommended.label}, but ${selected.label} was chosen. The rollout defended well, but the training config was still wrong.`
+              : `No activation was set for ${run.trainingTask.label}, so the model never reached deployment quality.`
+          );
+        } else {
+          finishRun(
+            true,
+            `Agent deployed with ${Math.round(resources.accuracy)}% accuracy.`,
+            selected && selected.id === recommended.id
+              ? `The ${selected.label} choice matched the task well enough to survive rollout pressure and ship the model.`
+              : `${selected ? selected.label : "Your activation"} was not ideal for ${run.trainingTask.label}, but strong data quality and rollout defense still carried the model over the deployment threshold.`
+          );
+        }
+        return;
+      }
+    }
+
+    for (let i = state.anomalies.length - 1; i >= 0; i--) {
+      const anomaly = state.anomalies[i];
+      anomaly.wobble += dt * 6.8;
+      const dx = nodes.gate.x - anomaly.x;
+      const dy = nodes.gate.y - anomaly.y;
+      const d = length(dx, dy) || 1;
+      anomaly.x += (dx / d) * anomaly.speed * dt;
+      anomaly.y += (dy / d) * anomaly.speed * dt;
+
+      if (d <= nodes.gate.r * 0.76) {
+        run.deployHits += 1;
+        run.deployProgress = clamp(run.deployProgress - 12, 0, 100);
+        resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.7, 0, 100);
+        emitParticles(anomaly.x, anomaly.y, "255,120,140", 18, 40, 160, 0.55, 5);
+        emitRing(nodes.gate.x, nodes.gate.y, "255,120,140", 18, 128, 0.45);
+        playSound("damage");
+        state.anomalies.splice(i, 1);
+        setNotice("Injection wave hit the serve gateway. Rollout lost progress.", 1.4);
+        continue;
+      }
+
+      if (dist(player, anomaly) <= player.r + anomaly.r + 2) {
+        resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.35, 0, 100);
+        emitParticles(player.x, player.y, "255,140,155", 14, 40, 130, 0.4, 4);
+        playSound("damage");
+        state.anomalies.splice(i, 1);
+        setNotice("An injection wave reached the guardian. Integrity reduced.", 1.2);
+      }
+    }
+
+    if (!run.deploymentActive && nearStation(nodes.gate, 54)) {
+      setNotice("Press E or B at the gateway to start the deployment rollout.", 0.95);
+    }
+  }
+
   function updatePlaying(dt) {
     const difficulty = getDifficulty();
     const model = getModel();
@@ -769,6 +1599,14 @@
     const player = state.player;
 
     state.timeElapsed += dt;
+    updateEffects(dt);
+
+    if (state.run.stage === "training") {
+      const buttons = getActivationButtons();
+      state.ui.activeButtons = buttons;
+      resolveHover(buttons);
+      handleTrainingActivationHotkeys();
+    }
 
     const horizontal =
       (isKeyDown("ArrowRight", "KeyD") ? 1 : 0) -
@@ -798,7 +1636,7 @@
     player.x = clamp(player.x, player.r + 24, BASE_WIDTH - player.r - 24);
     player.y = clamp(player.y, player.r + 94, BASE_HEIGHT - player.r - 24);
 
-    resources.compute = clamp(resources.compute + (6.2 + squad * 1.05) * dt, 0, 100);
+    resources.compute = clamp(resources.compute + (5.2 + squad * 0.9) * dt, 0, 100);
     resources.timeLeft = Math.max(0, resources.timeLeft - dt);
     player.cooldown = Math.max(0, player.cooldown - dt);
 
@@ -807,7 +1645,7 @@
     }
 
     const click = consumePointerClick();
-    if (click) {
+    if (click && !handleTrainingActivationClick(click)) {
       emitProjectile(click.x, click.y);
     }
 
@@ -824,105 +1662,35 @@
       return;
     }
 
-    state.spawnTimer -= dt;
-    if (state.spawnTimer <= 0) {
-      spawnAnomaly();
-      state.spawnTimer = difficulty.spawnInterval * rand(0.85, 1.15);
-    }
+    updateProjectiles(dt);
+    resolveProjectileHits();
 
-    state.shardTimer -= dt;
-    if (state.shardTimer <= 0 && state.shards.length < difficulty.shardTarget) {
-      spawnShard();
-      state.shardTimer = rand(1.4, 2.8);
-    }
-
-    for (let i = state.projectiles.length - 1; i >= 0; i--) {
-      const projectile = state.projectiles[i];
-      projectile.x += projectile.vx * dt;
-      projectile.y += projectile.vy * dt;
-      projectile.ttl -= dt;
-      if (
-        projectile.ttl <= 0 ||
-        projectile.x < -20 ||
-        projectile.x > BASE_WIDTH + 20 ||
-        projectile.y < -20 ||
-        projectile.y > BASE_HEIGHT + 20
-      ) {
-        state.projectiles.splice(i, 1);
+    if (state.run.stage === "collection") {
+      updateCollectionStage(dt, difficulty);
+    } else if (state.run.stage === "training") {
+      updateTrainingStage(dt, difficulty);
+    } else {
+      updateDeploymentStage(dt, difficulty);
+      if (state.mode !== "playing") {
+        return;
       }
     }
 
-    for (let i = state.shards.length - 1; i >= 0; i--) {
-      const shard = state.shards[i];
-      shard.pulse += dt * 3.6;
-      if (dist(player, shard) <= player.r + shard.r + 4) {
-        state.resources.data += 4;
-        state.resources.score += 8;
-        state.shards.splice(i, 1);
-      }
-    }
-
-    for (let i = state.anomalies.length - 1; i >= 0; i--) {
-      const anomaly = state.anomalies[i];
-      const toClusterX = state.stations.cluster.x - anomaly.x;
-      const toClusterY = state.stations.cluster.y - anomaly.y;
-      const d = length(toClusterX, toClusterY) || 1;
-      anomaly.x += (toClusterX / d) * anomaly.speed * dt;
-      anomaly.y += (toClusterY / d) * anomaly.speed * dt;
-      anomaly.wobble += dt * 5;
-
-      if (d <= state.stations.cluster.r * 0.66) {
-        state.resources.alignment = clamp(
-          state.resources.alignment - difficulty.alignmentHit,
-          0,
-          100
-        );
-        setNotice("Anomaly hit cluster integrity.", 1.2);
-        state.anomalies.splice(i, 1);
-        continue;
-      }
-
-      if (dist(player, anomaly) <= player.r + anomaly.r + 2) {
-        state.resources.alignment = clamp(state.resources.alignment - difficulty.alignmentHit * 0.45, 0, 100);
-        state.anomalies.splice(i, 1);
-        setNotice("Direct drift contact. Alignment reduced.", 1.2);
-        continue;
-      }
-    }
-
-    for (let i = state.projectiles.length - 1; i >= 0; i--) {
-      const projectile = state.projectiles[i];
-      let hit = false;
-      for (let j = state.anomalies.length - 1; j >= 0; j--) {
-        const anomaly = state.anomalies[j];
-        if (dist(projectile, anomaly) <= projectile.r + anomaly.r + 1) {
-          state.resources.score += 12;
-          state.resources.compute = clamp(state.resources.compute + 4, 0, 100);
-          state.anomalies.splice(j, 1);
-          hit = true;
-          break;
-        }
-      }
-      if (hit) {
-        state.projectiles.splice(i, 1);
-      }
-    }
-
-    if (state.resources.training >= 100 && nearStation(state.stations.gate, 52)) {
-      if (state.resources.accuracy < 50) {
-        setNotice(`Warning: accuracy ${Math.round(state.resources.accuracy)}% below 50% deploy threshold.`, 1.2);
-      } else {
-        setNotice("Press E or B to deploy your trained agent.", 0.9);
-      }
-    }
-
-    if (state.resources.timeLeft <= 0) {
-      finishRun(false, "Funding window closed before deployment.");
+    if (resources.timeLeft <= 0) {
+      finishRun(
+        false,
+        "Funding window closed before the three-level pipeline finished.",
+        "Data quality, training configuration, and rollout defense all consume time. Real ML programs fail when runway disappears."
+      );
       return;
     }
 
-    if (state.resources.alignment <= 0) {
-      finishRun(false, "Alignment collapsed due to unmanaged drift.");
+    if (resources.alignment <= 0) {
+      finishRun(
+        false,
+        "System integrity collapsed under repeated attacks.",
+        "Each level had a different failure mode. Clean data, stable training, and defended deployment all matter."
+      );
     }
   }
 
@@ -964,36 +1732,60 @@
 
   function drawBackground() {
     const grad = ctx.createLinearGradient(0, 0, BASE_WIDTH, BASE_HEIGHT);
-    grad.addColorStop(0, "#04212f");
-    grad.addColorStop(0.5, "#0c3450");
-    grad.addColorStop(1, "#11384c");
+    grad.addColorStop(0, "#061b2f");
+    grad.addColorStop(0.42, "#0e3958");
+    grad.addColorStop(1, "#11293c");
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
 
-    for (let i = 0; i < 24; i++) {
-      const y = 80 + i * 28;
-      const pulse = Math.sin(state.timeElapsed * 0.6 + i * 0.4) * 0.12 + 0.16;
+    const haze = [
+      { x: 176, y: 118, r: 132, c: "rgba(94, 182, 255, 0.18)" },
+      { x: 460, y: 92, r: 110, c: "rgba(140, 242, 189, 0.16)" },
+      { x: 1034, y: 118, r: 138, c: "rgba(255, 188, 126, 0.12)" },
+      { x: 1126, y: 596, r: 172, c: "rgba(116, 174, 255, 0.13)" },
+    ];
+    for (const orb of haze) {
+      ctx.fillStyle = orb.c;
+      ctx.beginPath();
+      ctx.arc(orb.x, orb.y, orb.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    for (let i = 0; i < 25; i++) {
+      const y = 88 + i * 24;
+      const pulse = Math.sin(state.timeElapsed * 0.65 + i * 0.45) * 0.08 + 0.13;
       ctx.strokeStyle = `rgba(140, 220, 255, ${pulse})`;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = i % 4 === 0 ? 1.4 : 1;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(BASE_WIDTH, y);
       ctx.stroke();
     }
 
-    const nodes = [
-      { x: 170, y: 120, c: "rgba(104, 198, 255, 0.3)" },
-      { x: 420, y: 86, c: "rgba(139, 238, 189, 0.28)" },
-      { x: 920, y: 94, c: "rgba(255, 198, 124, 0.24)" },
-      { x: 1140, y: 150, c: "rgba(144, 239, 214, 0.2)" },
-      { x: 1030, y: 620, c: "rgba(119, 186, 255, 0.25)" },
-    ];
-
-    for (const node of nodes) {
-      ctx.fillStyle = node.c;
+    for (let i = 0; i < 8; i++) {
+      const x = 80 + i * 160;
+      ctx.strokeStyle = `rgba(104, 198, 255, ${0.04 + (i % 2) * 0.03})`;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(node.x, node.y, 90, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(x, 70);
+      ctx.lineTo(x, BASE_HEIGHT - 40);
+      ctx.stroke();
+    }
+
+    for (let i = 0; i < 4; i++) {
+      const baseY = 150 + i * 116;
+      ctx.strokeStyle = `rgba(159, 221, 246, ${0.08 + i * 0.02})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let x = 0; x <= BASE_WIDTH; x += 24) {
+        const y = baseY + Math.sin(state.timeElapsed * 0.8 + x * 0.012 + i) * (8 + i * 3);
+        if (x === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
     }
   }
 
@@ -1001,21 +1793,28 @@
     ctx.save();
     ctx.translate(station.x, station.y);
 
-    ctx.fillStyle = `${color}22`;
+    ctx.fillStyle = `${color}12`;
     ctx.beginPath();
-    ctx.arc(0, 0, station.r + 20, 0, Math.PI * 2);
+    ctx.arc(0, 0, station.r + 28, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.strokeStyle = `${color}cc`;
-    ctx.lineWidth = emphasized ? 5 : 3;
+    ctx.lineWidth = emphasized ? 5 : 2.5;
     ctx.beginPath();
     ctx.arc(0, 0, station.r, 0, Math.PI * 2);
     ctx.stroke();
 
-    ctx.fillStyle = `${color}44`;
+    ctx.fillStyle = `${color}30`;
     ctx.beginPath();
     ctx.arc(0, 0, station.r * 0.72, 0, Math.PI * 2);
     ctx.fill();
+
+    ctx.strokeStyle = `${color}55`;
+    ctx.setLineDash([8, 10]);
+    ctx.beginPath();
+    ctx.arc(0, 0, station.r + 14 + Math.sin(state.timeElapsed * 2) * 2, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
 
     ctx.fillStyle = "#eaf9ff";
     ctx.font = "700 18px Space Grotesk";
@@ -1023,8 +1822,8 @@
     ctx.fillText(station.name, 0, station.r + 34);
 
     ctx.fillStyle = "#b4d8e7";
-    ctx.font = "500 14px Space Grotesk";
-    ctx.fillText(subtitle, 0, station.r + 55);
+    ctx.font = "500 13px Space Grotesk";
+    drawWrappedText(subtitle, 0, station.r + 54, 170, 15, "center");
     ctx.restore();
   }
 
@@ -1039,23 +1838,58 @@
     const angle = Math.atan2(p.facingY, p.facingX);
     ctx.rotate(angle);
 
-    ctx.fillStyle = "#f5f8ff";
-    ctx.strokeStyle = "#57c6ff";
+    const idlePulse = Math.sin(state.timeElapsed * 6) * 0.06 + 1;
+    const guardGrad = ctx.createLinearGradient(-18, -16, 24, 18);
+    guardGrad.addColorStop(0, "#f1fbff");
+    guardGrad.addColorStop(0.55, "#9ddfff");
+    guardGrad.addColorStop(1, "#5bc7ff");
+
+    ctx.strokeStyle = "rgba(108, 220, 255, 0.5)";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, 29 * idlePulse, -Math.PI * 0.65, Math.PI * 0.65);
+    ctx.stroke();
+
+    ctx.fillStyle = guardGrad;
+    ctx.strokeStyle = "#d8f7ff";
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(20, 0);
-    ctx.lineTo(-12, 13);
-    ctx.lineTo(-8, 0);
-    ctx.lineTo(-12, -13);
+    ctx.moveTo(24, 0);
+    ctx.lineTo(-10, 18);
+    ctx.lineTo(-2, 6);
+    ctx.lineTo(-18, 0);
+    ctx.lineTo(-2, -6);
+    ctx.lineTo(-10, -18);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
 
+    ctx.fillStyle = "#0f2f43";
+    ctx.beginPath();
+    ctx.arc(-2, 0, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#9af6ff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-7, 0);
+    ctx.lineTo(3, 0);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255, 220, 120, 0.95)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-13, 0);
+    ctx.lineTo(-28, -8);
+    ctx.moveTo(-13, 0);
+    ctx.lineTo(-28, 8);
+    ctx.stroke();
+
     if (p.cooldown > 0.02) {
-      ctx.strokeStyle = "rgba(255, 210, 96, 0.92)";
+      ctx.strokeStyle = "rgba(255, 210, 96, 0.95)";
       ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.arc(0, 0, 24, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - p.cooldown / 0.29));
+      ctx.arc(0, 0, 32, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - p.cooldown / 0.29));
       ctx.stroke();
     }
     ctx.restore();
@@ -1065,19 +1899,22 @@
     for (const shard of state.shards) {
       ctx.save();
       ctx.translate(shard.x, shard.y);
-      ctx.rotate(shard.pulse * 0.8);
-      const shimmer = 0.72 + Math.sin(shard.pulse) * 0.18;
-      ctx.fillStyle = `rgba(133, 243, 183, ${shimmer})`;
-      ctx.strokeStyle = "rgba(219, 255, 236, 0.95)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, -12);
-      ctx.lineTo(10, 0);
-      ctx.lineTo(0, 12);
-      ctx.lineTo(-10, 0);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      ctx.rotate(shard.tilt + shard.pulse * 0.15);
+      if (shard.type === "drop") {
+        drawPanel(-13, -15, 26, 30, "rgba(135,243,183,0.88)", "rgba(228,255,240,0.94)", 7, 2);
+        ctx.fillStyle = "rgba(11,57,55,0.82)";
+        ctx.fillRect(-6, -7, 12, 2.2);
+        ctx.fillRect(-6, -1, 10, 2.2);
+        ctx.fillRect(-6, 5, 8, 2.2);
+        ctx.strokeStyle = "rgba(187,255,220,0.5)";
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(0, -18);
+        ctx.lineTo(0, -30 - Math.sin(shard.pulse) * 4);
+        ctx.stroke();
+      } else {
+        drawPanel(-12, -14, 24, 28, "rgba(135,243,183,0.84)", "rgba(228,255,240,0.94)", 7, 2);
+      }
       ctx.restore();
     }
   }
@@ -1086,23 +1923,120 @@
     for (const anomaly of state.anomalies) {
       ctx.save();
       ctx.translate(anomaly.x, anomaly.y);
-      ctx.rotate(anomaly.wobble * 0.4);
+      ctx.rotate(anomaly.wobble * 0.28);
 
-      ctx.fillStyle = "rgba(255, 110, 130, 0.88)";
-      ctx.strokeStyle = "rgba(255, 222, 229, 0.85)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let i = 0; i < 7; i++) {
-        const angle = (Math.PI * 2 * i) / 7;
-        const radius = i % 2 === 0 ? 18 : 10;
-        const x = Math.cos(angle) * radius;
-        const y = Math.sin(angle) * radius;
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
+      if (anomaly.type === "scrambler") {
+        const outer = ctx.createRadialGradient(0, 0, 4, 0, 0, 26);
+        outer.addColorStop(0, "rgba(255,145,166,0.96)");
+        outer.addColorStop(1, "rgba(255,88,118,0.16)");
+        ctx.fillStyle = outer;
+        ctx.beginPath();
+        ctx.arc(0, 0, 26, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "rgba(255,110,130,0.9)";
+        ctx.strokeStyle = "rgba(255,230,235,0.8)";
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        for (let i = 0; i < 9; i++) {
+          const angle = (Math.PI * 2 * i) / 9;
+          const radius = i % 2 === 0 ? 18 : 8;
+          const x = Math.cos(angle) * radius;
+          const y = Math.sin(angle) * radius;
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
         }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.rotate(-anomaly.wobble * 0.56);
+        ctx.fillStyle = "#fff4f6";
+        ctx.fillRect(-8, -2, 16, 4);
+        ctx.fillRect(-2, -8, 4, 16);
+      } else if (anomaly.type === "gradient_spike") {
+        ctx.fillStyle = "rgba(255,174,110,0.16)";
+        ctx.beginPath();
+        ctx.arc(0, 0, 28, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,215,164,0.92)";
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.moveTo(-12, -18);
+        ctx.lineTo(2, -2);
+        ctx.lineTo(-4, -2);
+        ctx.lineTo(12, 18);
+        ctx.lineTo(0, 2);
+        ctx.lineTo(6, 2);
+        ctx.closePath();
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = "rgba(255,112,176,0.16)";
+        ctx.beginPath();
+        ctx.arc(0, 0, 30, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,170,221,0.88)";
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(0, -18);
+        ctx.lineTo(16, -6);
+        ctx.lineTo(10, 18);
+        ctx.lineTo(-10, 18);
+        ctx.lineTo(-16, -6);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(255,220,240,0.72)";
+        ctx.beginPath();
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.stroke();
       }
+      ctx.restore();
+    }
+  }
+
+  function drawEffects() {
+    for (const effect of state.effects) {
+      const alpha = effect.life / effect.maxLife;
+      if (effect.kind === "particle") {
+        ctx.fillStyle = `rgba(${effect.color}, ${alpha * 0.9})`;
+        ctx.beginPath();
+        ctx.arc(effect.x, effect.y, effect.size * alpha, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (effect.kind === "ring") {
+        ctx.strokeStyle = `rgba(${effect.color}, ${alpha * 0.8})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(effect.x, effect.y, effect.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawProjectiles() {
+    for (const projectile of state.projectiles) {
+      for (let i = 0; i < projectile.trail.length; i++) {
+        const trail = projectile.trail[i];
+        const alpha = 1 - i / Math.max(1, projectile.trail.length);
+        ctx.fillStyle = `rgba(255, 210, 120, ${alpha * 0.35})`;
+        ctx.beginPath();
+        ctx.arc(trail.x, trail.y, projectile.r * alpha, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.save();
+      ctx.translate(projectile.x, projectile.y);
+      ctx.rotate(Math.atan2(projectile.vy, projectile.vx) + projectile.spin);
+      ctx.fillStyle = "rgba(255, 232, 170, 0.98)";
+      ctx.strokeStyle = "rgba(255, 248, 220, 0.95)";
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(9, 0);
+      ctx.lineTo(-3, 4.5);
+      ctx.lineTo(-1, 0);
+      ctx.lineTo(-3, -4.5);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
@@ -1110,117 +2044,248 @@
     }
   }
 
-  function drawProjectiles() {
-    for (const projectile of state.projectiles) {
-      ctx.fillStyle = "rgba(255, 230, 150, 0.95)";
-      ctx.beginPath();
-      ctx.arc(projectile.x, projectile.y, projectile.r, 0, Math.PI * 2);
-      ctx.fill();
+  function drawCollectionInterface() {
+    const nodes = getStageNodes();
+    const run = state.run;
+    const resources = state.resources;
+    drawPanel(84, 140, 1112, 476, "rgba(6,24,40,0.34)", "rgba(157,225,246,0.18)", 24, 2);
+
+    ctx.strokeStyle = "rgba(132,220,255,0.32)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 10]);
+    ctx.beginPath();
+    ctx.moveTo(nodes.source.x - 180, nodes.source.y + 22);
+    ctx.lineTo(nodes.source.x - 180, 608);
+    ctx.moveTo(nodes.source.x + 180, nodes.source.y + 22);
+    ctx.lineTo(nodes.source.x + 180, 608);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    drawStation(nodes.source, "#6bd6ff", "Packets drop continuously from the upstream source.", false);
+    drawStation(
+      nodes.relay,
+      "#9fe6ff",
+      resources.data >= run.collectionGoal ? "Dataset ready. Press E/B to relay into training." : `Need ${run.collectionGoal} clean packets.`,
+      nearStation(nodes.relay, 34)
+    );
+
+    drawPanel(102, 180, 290, 88, "rgba(12,43,64,0.64)", "rgba(126,214,255,0.36)", 18, 2);
+    ctx.fillStyle = "#e5faff";
+    ctx.font = "700 16px Space Grotesk";
+    ctx.fillText("Source Rule", 124, 210);
+    ctx.fillStyle = "#a9d7ea";
+    ctx.font = "500 13px Space Grotesk";
+    drawWrappedText("Catch falling clean packets before scramblers corrupt them. More clean data gives better training headroom.", 124, 234, 244, 16, "left");
+  }
+
+  function drawTrainingInterface() {
+    const nodes = getStageNodes();
+    const run = state.run;
+    const projected = Math.round(computeProjectedAccuracy());
+
+    drawPanel(78, 138, 1140, 484, "rgba(6,24,40,0.34)", "rgba(157,225,246,0.18)", 24, 2);
+    drawPanel(84, 166, 296, 224, "rgba(11,39,58,0.78)", "rgba(129,213,255,0.34)", 18, 2);
+    ctx.fillStyle = "#e7fbff";
+    ctx.font = "700 17px Space Grotesk";
+    ctx.fillText("Task Requirement", 108, 198);
+    ctx.fillStyle = "#d3eff8";
+    ctx.font = "700 20px Space Grotesk";
+    drawWrappedText(run.trainingTask.label, 108, 228, 240, 22, "left");
+    ctx.fillStyle = "#a8d7e7";
+    ctx.font = "500 13px Space Grotesk";
+    drawWrappedText(run.trainingTask.requirement, 108, 286, 240, 16, "left");
+    ctx.fillStyle = "#8cd0e6";
+    drawWrappedText(`Hint: ${run.trainingTask.clue}`, 108, 350, 240, 16, "left");
+
+    drawStation(nodes.upload, "#77e0ff", "Press E/B to upload a training batch.", nearStation(nodes.upload, 34));
+    drawStation(
+      nodes.core,
+      "#8cffb0",
+      `Projected final accuracy: ${projected}%`,
+      nearStation(nodes.core, 34)
+    );
+    drawStation(nodes.console, "#ffd37e", "Choose the right activation using click or 1-4.", nearStation(nodes.console, 34));
+
+    ctx.strokeStyle = "rgba(145, 226, 255, 0.38)";
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([14, 10]);
+    ctx.beginPath();
+    ctx.moveTo(nodes.upload.x + 70, nodes.upload.y - 28);
+    ctx.lineTo(nodes.core.x - 90, nodes.core.y + 24);
+    ctx.lineTo(nodes.console.x - 74, nodes.console.y - 16);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const buttons = getActivationButtons();
+    state.ui.activeButtons = buttons;
+    for (const button of buttons) {
+      const active = state.run.selectedActivation === button.id.replace("activation_", "");
+      const hovered = state.ui.hoverButtonId === button.id;
+      drawPanel(
+        button.rect.x,
+        button.rect.y,
+        button.rect.w,
+        button.rect.h,
+        active
+          ? "rgba(255,208,118,0.28)"
+          : hovered
+            ? "rgba(123,235,196,0.26)"
+            : "rgba(16,56,77,0.66)",
+        active
+          ? "rgba(255,243,211,0.92)"
+          : hovered
+            ? "rgba(182,253,229,0.82)"
+            : "rgba(121,190,220,0.52)",
+        14,
+        active ? 3 : 2
+      );
+      ctx.fillStyle = "#effbff";
+      ctx.font = "700 18px Space Grotesk";
+      ctx.fillText(button.label, button.rect.x + 18, button.rect.y + 26);
+      ctx.fillStyle = "#a5d8ea";
+      ctx.font = "500 12px Space Grotesk";
+      drawWrappedText(button.lesson, button.rect.x + 18, button.rect.y + 44, button.rect.w - 30, 14, "left");
     }
+  }
+
+  function drawDeploymentInterface() {
+    const nodes = getStageNodes();
+    const run = state.run;
+
+    drawPanel(86, 144, 1110, 470, "rgba(6,24,40,0.34)", "rgba(157,225,246,0.18)", 24, 2);
+    drawPanel(92, 182, 292, 188, "rgba(11,39,58,0.76)", "rgba(129,213,255,0.34)", 18, 2);
+    ctx.fillStyle = "#e8fbff";
+    ctx.font = "700 17px Space Grotesk";
+    ctx.fillText("Rollout Rule", 114, 214);
+    ctx.fillStyle = "#a6d6e8";
+    ctx.font = "500 13px Space Grotesk";
+    drawWrappedText(
+      run.deploymentActive
+        ? "The gateway is live. Injection waves now reduce rollout progress and integrity if they land."
+        : "Start the serve gateway only after you trust the training accuracy. Below 50% still fails deployment.",
+      114,
+      242,
+      244,
+      16,
+      "left"
+    );
+
+    drawStation(nodes.console, "#7ddcff", "Optional anchor console for rollout telemetry.", nearStation(nodes.console, 34));
+    drawStation(
+      nodes.gate,
+      "#9fffd3",
+      run.deploymentActive ? `Rollout ${Math.round(run.deployProgress)}%` : "Press E/B to start rollout.",
+      nearStation(nodes.gate, 36)
+    );
+
+    ctx.strokeStyle = "rgba(170,255,211,0.36)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(nodes.gate.x, nodes.gate.y, 128 + Math.sin(state.timeElapsed * 2.1) * 8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    drawPanel(546, 534, 384, 22, "rgba(17,60,77,0.86)", "rgba(161,236,255,0.34)", 12, 1.5);
+    drawPanel(548, 536, 380 * (run.deployProgress / 100), 18, "rgba(159,255,214,0.82)", null, 10, 0);
   }
 
   function drawHud() {
     const resources = state.resources;
     const model = getModel();
     const difficulty = getDifficulty();
-
-    ctx.fillStyle = "rgba(4, 18, 28, 0.62)";
-    ctx.fillRect(22, 18, BASE_WIDTH - 44, 96);
-
-    ctx.strokeStyle = "rgba(138, 210, 236, 0.46)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(22, 18, BASE_WIDTH - 44, 96);
+    const run = state.run;
+    const topY = 18;
+    drawPanel(20, topY, 360, 114, "rgba(4,18,28,0.72)", "rgba(144,221,246,0.46)", 18, 2);
+    drawPanel(396, topY, 864, 114, "rgba(4,18,28,0.7)", "rgba(144,221,246,0.42)", 18, 2);
 
     ctx.fillStyle = "#ebfbff";
     ctx.font = "700 17px Space Grotesk";
-    ctx.fillText(`Model: ${model.label}`, 42, 47);
+    ctx.fillText(`Guardian: ${model.label}`, 42, 48);
 
     ctx.fillStyle = "#bfe9ff";
     ctx.font = "600 14px Space Grotesk";
-    ctx.fillText(`Difficulty: ${difficulty.label}`, 42, 70);
+    ctx.fillText(`${getStageLabel()} | ${difficulty.label}`, 42, 72);
 
     ctx.fillStyle = "#9ed3e6";
     ctx.font = "500 12px Space Grotesk";
-    ctx.fillText(`Learn: ${model.microLesson}`, 42, 90);
+    ctx.fillText(`Learn: ${model.microLesson}`, 42, 96);
 
-    const phaseNow = Math.min(resources.trainingPhase + 1, TRAINING_PACKET_REQUIREMENTS.length);
-    const nextReq = getNextPacketRequirement();
-    const phaseChip = nextReq > 0
-      ? `Phase ${phaseNow}/3 Need ${nextReq}`
-      : "Phase 3/3 Done";
+    let stageChip = `Goal ${getCollectionGoal()} packets`;
+    if (run.stage === "training") {
+      stageChip = run.selectedActivation
+        ? `Act ${getSelectedActivation().label} | Upload ${run.uploadedPackets}/${run.trainingDataBudget}`
+        : `Activation unset | Upload ${run.uploadedPackets}/${run.trainingDataBudget}`;
+    } else if (run.stage === "deployment") {
+      stageChip = run.deploymentActive
+        ? `Rollout ${Math.round(run.deployProgress)}%`
+        : `Gateway standby`;
+    }
 
     const chips = [
       `Data ${resources.data}`,
       `Compute ${Math.round(resources.compute)}`,
-      `Alignment ${Math.round(resources.alignment)}`,
+      `Integrity ${Math.round(resources.alignment)}`,
       `Train ${Math.round(resources.training)}% | Acc ${Math.round(resources.accuracy)}%`,
-      phaseChip,
+      stageChip,
       `Time ${Math.ceil(resources.timeLeft)}s`,
       `Score ${Math.round(resources.score)}`,
     ];
 
-    let chipX = 320;
-    for (const chip of chips) {
-      const w = ctx.measureText(chip).width + 28;
-      ctx.fillStyle = "rgba(76, 173, 212, 0.28)";
-      ctx.fillRect(chipX, 33, w, 34);
-      ctx.strokeStyle = "rgba(188, 237, 255, 0.4)";
-      ctx.strokeRect(chipX, 33, w, 34);
+    const chipPositions = [
+      { x: 414, y: 32, w: 150 },
+      { x: 576, y: 32, w: 156 },
+      { x: 744, y: 32, w: 166 },
+      { x: 922, y: 32, w: 208 },
+      { x: 1142, y: 32, w: 102 },
+      { x: 414, y: 72, w: 198 },
+      { x: 624, y: 72, w: 154 },
+    ];
+
+    ctx.font = "600 13px Space Grotesk";
+    for (let i = 0; i < chips.length; i++) {
+      const chip = chips[i];
+      const pos = chipPositions[i];
+      drawPanel(pos.x, pos.y, pos.w, 28, "rgba(76,173,212,0.18)", "rgba(188,237,255,0.3)", 10, 1.6);
       ctx.fillStyle = "#f0f9ff";
-      ctx.font = "600 14px Space Grotesk";
-      ctx.fillText(chip, chipX + 14, 55);
-      chipX += w + 10;
+      ctx.fillText(chip, pos.x + 12, pos.y + 18);
     }
 
     if (state.ui.notice) {
-      ctx.fillStyle = "rgba(255, 248, 204, 0.95)";
-      ctx.fillRect(BASE_WIDTH / 2 - 250, BASE_HEIGHT - 72, 500, 44);
-      ctx.strokeStyle = "rgba(91, 142, 165, 0.7)";
-      ctx.strokeRect(BASE_WIDTH / 2 - 250, BASE_HEIGHT - 72, 500, 44);
+      drawPanel(BASE_WIDTH / 2 - 292, BASE_HEIGHT - 82, 584, 54, "rgba(255,248,204,0.95)", "rgba(91,142,165,0.7)", 14, 2);
       ctx.fillStyle = "#10394d";
       ctx.font = "600 16px Space Grotesk";
       ctx.textAlign = "center";
-      ctx.fillText(state.ui.notice, BASE_WIDTH / 2, BASE_HEIGHT - 44);
+      drawWrappedText(state.ui.notice, BASE_WIDTH / 2, BASE_HEIGHT - 52, 520, 17, "center");
       ctx.textAlign = "left";
     }
 
+    drawPanel(22, BASE_HEIGHT - 160, 412, 80, "rgba(7,24,39,0.76)", "rgba(120,186,216,0.34)", 16, 2);
+    ctx.fillStyle = "#dff7ff";
+    ctx.font = "700 15px Space Grotesk";
+    ctx.fillText("Learning Feed", 42, BASE_HEIGHT - 128);
+    ctx.fillStyle = "#acd7e9";
+    ctx.font = "500 13px Space Grotesk";
+    drawWrappedText(getLearningPrompt(), 42, BASE_HEIGHT - 106, 372, 16, "left");
+
+    const controlLine = run.stage === "training"
+      ? "Move: Arrows/WASD  Fire: Space/Click  Interact: E/B  Set Activation: 1-4 or click  Pause: Esc/P"
+      : "Move: Arrows/WASD  Fire Epoch Burst: Space/Click  Interact: E/B  Pause: Esc/P  Fullscreen: F";
     ctx.fillStyle = "rgba(208, 240, 255, 0.82)";
     ctx.font = "500 13px Space Grotesk";
-    ctx.fillText("Move: Arrows/WASD  Shoot: Space/Click  Interact: E/B  Pause: Esc/P  Fullscreen: F", 34, BASE_HEIGHT - 14);
+    ctx.fillText(controlLine, 32, BASE_HEIGHT - 12);
   }
 
   function drawGameplay() {
     drawBackground();
 
-    const nextReq = getNextPacketRequirement();
-    const clusterSubtitle = nextReq > 0
-      ? `Phase ${state.resources.trainingPhase + 1}: need ${nextReq}+ packets (E/B)`
-      : "Core training complete";
-    const gateSubtitle = state.resources.training < 100
-      ? "Locked until training is complete"
-      : state.resources.accuracy < 50
-        ? `Accuracy ${Math.round(state.resources.accuracy)}% < 50% (deploy fails)`
-        : "Deploy now (E/B)";
+    if (state.run.stage === "collection") {
+      drawCollectionInterface();
+    } else if (state.run.stage === "training") {
+      drawTrainingInterface();
+    } else {
+      drawDeploymentInterface();
+    }
 
-    drawStation(state.stations.data, "#6bd6ff", "Synthesize +10 packets (E/B)", nearStation(state.stations.data, 34));
-    drawStation(state.stations.cluster, "#8cffb0", clusterSubtitle, nearStation(state.stations.cluster, 36));
-    drawStation(
-      state.stations.gate,
-      "#ffd17e",
-      gateSubtitle,
-      nearStation(state.stations.gate, 36)
-    );
-
-    ctx.strokeStyle = "rgba(190, 230, 246, 0.42)";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([10, 10]);
-    ctx.beginPath();
-    ctx.moveTo(state.stations.data.x + 60, state.stations.data.y - 70);
-    ctx.lineTo(state.stations.cluster.x - 90, state.stations.cluster.y - 76);
-    ctx.lineTo(state.stations.gate.x - 72, state.stations.gate.y - 68);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
+    drawEffects();
     drawShards();
     drawProjectiles();
     drawAnomalies();
@@ -1232,20 +2297,24 @@
     const hovered = state.ui.hoverButtonId === button.id;
     const r = button.rect;
 
-    ctx.fillStyle = active
-      ? "rgba(113, 215, 255, 0.45)"
-      : hovered
-        ? "rgba(114, 230, 186, 0.33)"
-        : "rgba(17, 54, 77, 0.72)";
-    ctx.fillRect(r.x, r.y, r.w, r.h);
-
-    ctx.strokeStyle = active
-      ? "rgba(208, 249, 255, 0.95)"
-      : hovered
-        ? "rgba(177, 255, 225, 0.85)"
-        : "rgba(117, 186, 217, 0.56)";
-    ctx.lineWidth = active ? 3 : 2;
-    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    drawPanel(
+      r.x,
+      r.y,
+      r.w,
+      r.h,
+      active
+        ? "rgba(113, 215, 255, 0.45)"
+        : hovered
+          ? "rgba(114, 230, 186, 0.33)"
+          : "rgba(17, 54, 77, 0.72)",
+      active
+        ? "rgba(208, 249, 255, 0.95)"
+        : hovered
+          ? "rgba(177, 255, 225, 0.85)"
+          : "rgba(117, 186, 217, 0.56)",
+      12,
+      active ? 3 : 2
+    );
 
     ctx.fillStyle = "#edfbff";
     ctx.font = "700 22px Space Grotesk";
@@ -1257,11 +2326,7 @@
   function drawMainMenu() {
     drawBackground();
 
-    ctx.fillStyle = "rgba(6, 24, 40, 0.68)";
-    ctx.fillRect(180, 88, 920, 548);
-    ctx.strokeStyle = "rgba(164, 229, 255, 0.56)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(180, 88, 920, 548);
+    drawPanel(170, 74, 940, 572, "rgba(6,24,40,0.72)", "rgba(164,229,255,0.5)", 24, 2);
 
     ctx.fillStyle = "#d2f7ff";
     ctx.font = "800 66px Syne";
@@ -1275,22 +2340,19 @@
     ctx.fillStyle = "#caebf8";
     ctx.font = "500 18px Space Grotesk";
     ctx.fillText(
-      "Design your AI stack, collect data, train a model, defend against drift, and deploy before time runs out.",
+      "Run a three-level AI pipeline: collect data, configure training, and survive deployment.",
       BASE_WIDTH / 2,
       276
     );
 
     ctx.fillStyle = "#9cd5ea";
     ctx.font = "500 15px Space Grotesk";
-    ctx.fillText("Learn real model families while you play: Llama, Qwen, and Mistral.", BASE_WIDTH / 2, 302);
+    ctx.fillText("Learn model tradeoffs, activation functions, and rollout defense while firing epoch bursts.", BASE_WIDTH / 2, 302);
 
     const model = getModel();
     const difficulty = getDifficulty();
     const squad = getSquadSize();
-    ctx.fillStyle = "rgba(80, 168, 204, 0.31)";
-    ctx.fillRect(250, 536, 780, 84);
-    ctx.strokeStyle = "rgba(156, 221, 246, 0.4)";
-    ctx.strokeRect(250, 536, 780, 84);
+    drawPanel(250, 536, 780, 84, "rgba(80,168,204,0.26)", "rgba(156,221,246,0.36)", 18, 2);
     ctx.fillStyle = "#e4f9ff";
     ctx.font = "600 16px Space Grotesk";
     ctx.fillText(
@@ -1318,11 +2380,7 @@
   function drawSettings() {
     drawBackground();
 
-    ctx.fillStyle = "rgba(8, 26, 38, 0.76)";
-    ctx.fillRect(160, 72, 960, 578);
-    ctx.strokeStyle = "rgba(166, 231, 255, 0.55)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(160, 72, 960, 578);
+    drawPanel(150, 62, 980, 598, "rgba(8,26,38,0.78)", "rgba(166,231,255,0.5)", 24, 2);
 
     ctx.fillStyle = "#daf9ff";
     ctx.font = "800 54px Syne";
@@ -1331,7 +2389,7 @@
 
     ctx.fillStyle = "#a0dff8";
     ctx.font = "500 18px Space Grotesk";
-    ctx.fillText("Tune real model families, challenge pressure, and operator count.", BASE_WIDTH / 2, 186);
+    ctx.fillText("Tune real model families, challenge pressure, operator count, and sound cues.", BASE_WIDTH / 2, 186);
 
     const rows = settingsRowRects();
     state.ui.activeButtons = rows;
@@ -1342,31 +2400,35 @@
       const hovered = state.ui.hoverButtonId === row.id;
       const rect = row.rect;
 
-      ctx.fillStyle = active
-        ? "rgba(112, 208, 255, 0.4)"
-        : hovered
-          ? "rgba(126, 236, 197, 0.33)"
-          : "rgba(16, 56, 77, 0.68)";
-      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-
-      ctx.strokeStyle = active
-        ? "rgba(212, 250, 255, 0.95)"
-        : hovered
-          ? "rgba(182, 253, 229, 0.86)"
-          : "rgba(121, 190, 220, 0.58)";
-      ctx.lineWidth = active ? 3 : 2;
-      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+      drawPanel(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        active
+          ? "rgba(112, 208, 255, 0.4)"
+          : hovered
+            ? "rgba(126, 236, 197, 0.33)"
+            : "rgba(16, 56, 77, 0.68)",
+        active
+          ? "rgba(212, 250, 255, 0.95)"
+          : hovered
+            ? "rgba(182, 253, 229, 0.86)"
+            : "rgba(121, 190, 220, 0.58)",
+        14,
+        active ? 3 : 2
+      );
 
       ctx.fillStyle = "#e8fbff";
-      ctx.font = "700 23px Space Grotesk";
+      ctx.font = "700 21px Space Grotesk";
       ctx.textAlign = "left";
-      ctx.fillText(row.label, rect.x + 24, rect.y + 34);
+      ctx.fillText(row.label, rect.x + 24, rect.y + 29);
 
       if (row.value) {
         ctx.fillStyle = "#bde7f7";
-        ctx.font = "500 18px Space Grotesk";
+        ctx.font = "500 17px Space Grotesk";
         ctx.textAlign = "right";
-        ctx.fillText(row.value, rect.x + rect.w - 24, rect.y + 52);
+        ctx.fillText(row.value, rect.x + rect.w - 24, rect.y + 42);
       }
     }
 
@@ -1380,11 +2442,7 @@
   function drawBriefing() {
     drawBackground();
 
-    ctx.fillStyle = "rgba(8, 26, 38, 0.78)";
-    ctx.fillRect(154, 70, 972, 580);
-    ctx.strokeStyle = "rgba(169, 232, 255, 0.54)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(154, 70, 972, 580);
+    drawPanel(144, 60, 992, 600, "rgba(8,26,38,0.8)", "rgba(169,232,255,0.5)", 24, 2);
 
     ctx.fillStyle = "#ddfbff";
     ctx.font = "800 52px Syne";
@@ -1395,17 +2453,18 @@
       "You run Agent Forge, an AI operations lab under a strict launch window.",
       "",
       "Flow:",
-      "1. Collect floating data shards in the arena.",
-      "2. Visit the Data Lake station to synthesize extra data from compute.",
-      "3. Train at cluster in phases: minimum 20 packets, then 30, then 40.",
-      "4. Minimum packets can finish training, but accuracy stays low.",
-      "5. Reach at least 50% accuracy before deployment or launch fails.",
-      "6. Eliminate drift anomalies before they damage alignment.",
+      "1. Level 1: clean packets drop from the source stream. Catch them before scramblers corrupt the dataset.",
+      "2. Move to the collection relay once you have enough clean packets to build a training set.",
+      "3. Level 2: read the random task brief and choose an activation function that fits it.",
+      "4. Upload packets into the training core while defending against gradient spikes.",
+      "5. The better your activation choice, the higher the final training accuracy.",
+      "6. Level 3: start rollout at the serve gateway and defend against deployment attacks.",
+      "7. Accuracy below 50% still fails deployment even if you survive the last defense phase.",
       "",
       "Concept tie-in:",
-      "- Data, compute, and alignment tradeoffs mirror real ML production pressure.",
-      "- Model family changes training efficiency and mobility.",
-      "- Difficulty controls drift frequency, impact, and available runway.",
+      "- Data quality gates the whole pipeline. Bad or missing packets reduce what training can learn.",
+      "- Activation functions matter: the right non-linearity depends on the task requirement.",
+      "- Deployment is its own discipline. Good models can still fail when rollout defenses collapse.",
       "",
       "Real model references:",
       "- Llama 3.1 8B (Meta): open weights and efficient adaptation.",
@@ -1436,20 +2495,16 @@
     ctx.fillStyle = "rgba(5, 16, 24, 0.7)";
     ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
 
-    ctx.fillStyle = "rgba(10, 33, 48, 0.92)";
-    ctx.fillRect(350, 184, 580, 384);
-    ctx.strokeStyle = "rgba(176, 234, 255, 0.68)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(350, 184, 580, 384);
+    drawPanel(350, 184, 580, 384, "rgba(10,33,48,0.92)", "rgba(176,234,255,0.68)", 22, 2);
 
     ctx.fillStyle = "#e5fbff";
-    ctx.font = "800 46px Syne";
+    ctx.font = "800 42px Syne";
     ctx.textAlign = "center";
-    ctx.fillText("Simulation Paused", BASE_WIDTH / 2, 258);
+    ctx.fillText("Simulation Paused", BASE_WIDTH / 2, 252);
 
     ctx.fillStyle = "#bde4f3";
     ctx.font = "500 18px Space Grotesk";
-    ctx.fillText("Review your plan and continue when ready.", BASE_WIDTH / 2, 296);
+    ctx.fillText("Review your plan and continue when ready.", BASE_WIDTH / 2, 292);
 
     const buttons = getPausedButtons();
     state.ui.activeButtons = buttons;
@@ -1473,31 +2528,59 @@
     ctx.fillStyle = "rgba(6, 17, 27, 0.74)";
     ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
 
-    ctx.fillStyle = "rgba(10, 33, 48, 0.95)";
-    ctx.fillRect(292, 128, 696, 470);
-    ctx.strokeStyle = result.victory
-      ? "rgba(174, 251, 205, 0.9)"
-      : "rgba(255, 195, 196, 0.9)";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(292, 128, 696, 470);
+    drawPanel(
+      292,
+      116,
+      696,
+      492,
+      "rgba(10,33,48,0.95)",
+      result.victory ? "rgba(174,251,205,0.9)" : "rgba(255,195,196,0.9)",
+      24,
+      3
+    );
 
     ctx.fillStyle = result.victory ? "#dbffe8" : "#ffe7e7";
-    ctx.font = "800 56px Syne";
+    ctx.font = "800 44px Syne";
     ctx.textAlign = "center";
-    ctx.fillText(result.victory ? "Deployment Success" : "Run Failed", BASE_WIDTH / 2, 206);
+    ctx.fillText(result.victory ? "Deployment Success" : "Run Failed", BASE_WIDTH / 2, 188);
 
     ctx.fillStyle = "#d6eff9";
-    ctx.font = "600 24px Space Grotesk";
-    ctx.fillText(result.reason, BASE_WIDTH / 2, 250);
+    ctx.font = "600 22px Space Grotesk";
+    const reasonLineCount = drawWrappedText(result.reason, BASE_WIDTH / 2, 236, 560, 28, "center");
 
     ctx.fillStyle = "#bfe3f5";
     ctx.font = "500 21px Space Grotesk";
-    ctx.fillText(`Score: ${Math.round(result.score)}`, BASE_WIDTH / 2, 304);
-    ctx.fillText(`Accuracy: ${Math.round(result.accuracy)}%`, BASE_WIDTH / 2, 338);
-    ctx.fillText(`Training: ${Math.round(result.training)}%`, BASE_WIDTH / 2, 372);
-    ctx.fillText(`Time Remaining: ${Math.ceil(result.remainingTime)}s`, BASE_WIDTH / 2, 406);
+    const metricsStartY = 236 + reasonLineCount * 28 + 22;
+    const metricLineHeight = 34;
+    ctx.fillText(`Score: ${Math.round(result.score)}`, BASE_WIDTH / 2, metricsStartY);
+    ctx.fillText(`Accuracy: ${Math.round(result.accuracy)}%`, BASE_WIDTH / 2, metricsStartY + metricLineHeight);
+    ctx.fillText(`Training: ${Math.round(result.training)}%`, BASE_WIDTH / 2, metricsStartY + metricLineHeight * 2);
+    ctx.fillText(
+      `Time Remaining: ${Math.ceil(result.remainingTime)}s`,
+      BASE_WIDTH / 2,
+      metricsStartY + metricLineHeight * 3
+    );
 
-    const buttons = getResultButtons();
+    const lessonY = metricsStartY + metricLineHeight * 3 + 24;
+    drawPanel(BASE_WIDTH / 2 - 230, lessonY - 18, 460, 52, "rgba(19,58,78,0.72)", null, 16, 0);
+
+    ctx.fillStyle = "#a9dcf0";
+    ctx.font = "500 15px Space Grotesk";
+    const lessonLineCount = drawWrappedText(
+      result.lesson
+        ? `Lesson: ${result.lesson}`
+        : result.victory
+          ? "Lesson: better packet coverage created a deployable model."
+          : "Lesson: rushed or noisy training left the model below deployment quality.",
+      BASE_WIDTH / 2,
+      lessonY,
+      420,
+      19,
+      "center"
+    );
+
+    const buttonStartY = lessonY + lessonLineCount * 19 + 22;
+    const buttons = getResultButtons(buttonStartY);
     state.ui.activeButtons = buttons;
     for (let i = 0; i < buttons.length; i++) {
       drawButton(buttons[i], state.ui.resultIndex === i);
@@ -1507,6 +2590,7 @@
   }
 
   function render() {
+    canvas.style.cursor = state.mode === "playing" ? "none" : "crosshair";
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, state.world.viewportWidth, state.world.viewportHeight);
@@ -1547,35 +2631,38 @@
       compute: 0,
       alignment: 0,
       training: 0,
-      trainingPhase: 0,
       accuracy: 0,
       score: 0,
       timeLeft: 0,
       deployed: false,
+      stageIndex: 0,
     };
-
-    let objective = "Collect data packets and train while defending the cluster";
-    const nextReq = getNextPacketRequirement();
-    if (resources.training < 100) {
-      objective = `Complete phase ${resources.trainingPhase + 1}: gather at least ${nextReq} packets`;
-    } else if (resources.accuracy < 50) {
-      objective = `Accuracy ${Math.round(resources.accuracy)}% below 50% threshold; deployment fails`;
-    } else {
-      objective = "Move to Deployment Gate and press E/B";
-    }
-    if (state.mode === "result") {
-      objective = state.result && state.result.victory
-        ? "Run complete: deployment successful"
-        : "Run complete: retry with better alignment/data strategy";
-    }
+    const run = state.run || {
+      stage: "collection",
+      collectionGoal: getDifficulty().collectionGoal,
+      trainingTask: pickTaskProfile(),
+      selectedActivation: null,
+      trainingDataBudget: 0,
+      uploadedPackets: 0,
+      deployProgress: 0,
+      deploymentActive: false,
+    };
+    const nodes = getStageNodes();
+    const objective = getObjectiveText();
 
     const payload = {
       coordinate_system: "origin=(0,0) top-left, +x right, +y down, world=1280x720",
       mode: state.mode,
+      stage: {
+        id: run.stage,
+        label: getStageLabel(),
+        index: STAGE_ORDER.indexOf(run.stage) + 1,
+      },
       settings: {
         model: getModel().label,
         difficulty: getDifficulty().label,
         squad: getSquadSize(),
+        sound_enabled: state.settings.soundEnabled,
       },
       model_profile: {
         organization: getModel().org,
@@ -1602,17 +2689,24 @@
         compute: Math.round(resources.compute),
         alignment: Math.round(resources.alignment),
         training: Math.round(resources.training),
-        training_phase: resources.trainingPhase,
-        next_phase_packets: nextReq,
         accuracy: Math.round(resources.accuracy),
         score: Math.round(resources.score),
         time_left_seconds: Number(resources.timeLeft.toFixed(1)),
+        collection_goal: run.collectionGoal || 0,
+        uploaded_packets: run.uploadedPackets || 0,
+        training_budget: run.trainingDataBudget || 0,
+        deploy_progress: Math.round(run.deployProgress || 0),
       },
-      stations: {
-        data_lake: { x: 220, y: 390 },
-        training_cluster: { x: 640, y: 390 },
-        deployment_gate: { x: 1060, y: 390 },
+      task_profile: {
+        name: run.trainingTask ? run.trainingTask.label : null,
+        requirement: run.trainingTask ? run.trainingTask.requirement : null,
+        clue: run.trainingTask ? run.trainingTask.clue : null,
+        selected_activation: run.selectedActivation,
+        activation_options: ACTIVATION_OPTIONS.map((option) => option.label),
       },
+      stage_nodes: Object.fromEntries(
+        Object.entries(nodes).map(([key, value]) => [key, { x: Math.round(value.x), y: Math.round(value.y) }])
+      ),
       entities: {
         shards: state.shards.slice(0, 8).map((s) => ({ x: Math.round(s.x), y: Math.round(s.y) })),
         anomalies: state.anomalies.slice(0, 8).map((a) => ({ x: Math.round(a.x), y: Math.round(a.y) })),
@@ -1632,6 +2726,7 @@
         hover_button: state.ui.hoverButtonId,
       },
       notice: state.ui.notice,
+      learning_prompt: getLearningPrompt(),
       fullscreen: Boolean(document.fullscreenElement),
     };
 
@@ -1661,6 +2756,8 @@
     if (event.repeat) {
       return;
     }
+
+    unlockAudio();
 
     if (event.code === "KeyF") {
       event.preventDefault();
@@ -1692,6 +2789,7 @@
     if (event.button !== 0) {
       return;
     }
+    unlockAudio();
     const p = toWorldPoint(event.clientX, event.clientY);
     state.input.pointerX = p.x;
     state.input.pointerY = p.y;
