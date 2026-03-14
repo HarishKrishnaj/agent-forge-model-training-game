@@ -74,38 +74,73 @@
     },
   ];
 
+  const TRAINING_METHOD_OPTIONS = [
+    {
+      id: "sft",
+      label: "Supervised Fine-Tuning",
+      lesson: "Best when you have labeled input-output examples for the target task.",
+    },
+    {
+      id: "instruction",
+      label: "Instruction Tuning",
+      lesson: "Best when the model must follow task prompts and produce helpful responses.",
+    },
+    {
+      id: "distillation",
+      label: "Distillation",
+      lesson: "Best when an expert model or policy already exists and you want a smaller replica.",
+    },
+    {
+      id: "preference",
+      label: "Preference Optimization",
+      lesson: "Best when human rankings or preference pairs define quality better than exact labels.",
+    },
+  ];
+
   const TASK_PROFILES = [
     {
       id: "sensor_classifier",
       label: "Sensor Drift Classifier",
-      requirement: "The model needs sparse feature activation and fast tabular decisions.",
+      requirement: "You have labeled clean-vs-drift packet examples and need fast tabular decisions.",
       clue: "Look for the activation that keeps only the useful positive signals alive.",
+      methodClue: "Use the method that learns directly from labeled examples.",
       recommendedActivation: "relu",
+      recommendedMethod: "sft",
       scores: { relu: 22, gelu: 10, silu: 6, tanh: -6 },
+      methodScores: { sft: 22, instruction: 4, distillation: 8, preference: -5 },
     },
     {
       id: "coding_assistant",
       label: "Coding Copilot Fine-Tune",
-      requirement: "The task needs smooth token transitions and transformer-friendly gradients.",
+      requirement: "You have prompt-response examples and need strong instruction following for code help.",
       clue: "Language and code generally prefer smooth activations over hard clipping.",
+      methodClue: "Use the method designed for prompt-following datasets rather than plain labels.",
       recommendedActivation: "gelu",
+      recommendedMethod: "instruction",
       scores: { relu: 4, gelu: 22, silu: 12, tanh: -4 },
+      methodScores: { sft: 10, instruction: 22, distillation: 9, preference: 4 },
     },
     {
       id: "tool_router",
       label: "Agent Tool Router",
-      requirement: "The policy needs self-gated behavior to route requests across tools efficiently.",
+      requirement: "An expert router already exists and you want a smaller model to copy its decisions.",
       clue: "A gated activation helps when the network must softly decide where traffic should go.",
+      methodClue: "Use the method that transfers behavior from a stronger teacher or policy.",
       recommendedActivation: "silu",
+      recommendedMethod: "distillation",
       scores: { relu: 7, gelu: 12, silu: 22, tanh: -3 },
+      methodScores: { sft: 8, instruction: 6, distillation: 22, preference: 9 },
     },
     {
-      id: "risk_regressor",
-      label: "Risk Control Head",
-      requirement: "Outputs must stay bounded above and below zero for stable scoring.",
-      clue: "Choose the activation that naturally keeps values within a signed range.",
+      id: "alignment_assistant",
+      label: "Safety Preference Assistant",
+      requirement: "You have ranked human preference pairs and need safer response behavior.",
+      clue: "Choose the activation that stays smooth while preserving useful negative feedback.",
+      methodClue: "Use the method that learns from preference rankings instead of exact answers.",
       recommendedActivation: "tanh",
-      scores: { relu: -8, gelu: 6, silu: 4, tanh: 22 },
+      recommendedMethod: "preference",
+      scores: { relu: -8, gelu: 8, silu: 5, tanh: 22 },
+      methodScores: { sft: 4, instruction: 8, distillation: 7, preference: 22 },
     },
   ];
 
@@ -263,19 +298,29 @@
     return ACTIVATION_OPTIONS.find((option) => option.id === state.run.selectedActivation) || null;
   }
 
+  function getSelectedMethod() {
+    if (!state.run || !state.run.selectedMethod) {
+      return null;
+    }
+    return (
+      TRAINING_METHOD_OPTIONS.find((option) => option.id === state.run.selectedMethod) || null
+    );
+  }
+
   function getStageNodes() {
     const stage = getStageId();
     if (stage === "collection") {
       return {
         source: { x: 640, y: 120, r: 66, name: "Source Stream" },
-        relay: { x: 1080, y: 556, r: 72, name: "Collection Relay" },
+        sorter: { x: 1066, y: 574, r: 72, name: "Quality Meter" },
       };
     }
     if (stage === "training") {
       return {
-        upload: { x: 258, y: 548, r: 70, name: "Upload Port" },
+        upload: { x: 270, y: 556, r: 70, name: "Upload Port" },
         core: { x: 708, y: 364, r: 96, name: "Training Core" },
-        console: { x: 1068, y: 358, r: 72, name: "Activation Rack" },
+        activation: { x: 1068, y: 278, r: 72, name: "Activation Rack" },
+        method: { x: 1068, y: 498, r: 72, name: "Training Method Rack" },
       };
     }
     return {
@@ -286,15 +331,30 @@
 
   function getActivationButtons() {
     const x = 948;
-    const y = 224;
+    const y = 166;
     const w = 264;
-    const h = 64;
-    const gap = 16;
+    const h = 48;
+    const gap = 10;
     return ACTIVATION_OPTIONS.map((option, idx) => ({
       ...option,
       label: `${idx + 1}. ${option.label}`,
       rect: { x, y: y + idx * (h + gap), w, h },
       id: `activation_${option.id}`,
+    }));
+  }
+
+  function getMethodButtons() {
+    const x = 948;
+    const y = 426;
+    const w = 264;
+    const h = 44;
+    const gap = 10;
+    const hotkeys = ["Q", "W", "E", "R"];
+    return TRAINING_METHOD_OPTIONS.map((option, idx) => ({
+      ...option,
+      label: `${hotkeys[idx]}. ${option.label}`,
+      rect: { x, y: y + idx * (h + gap), w, h },
+      id: `method_${option.id}`,
     }));
   }
 
@@ -320,6 +380,32 @@
     return run.trainingTask.scores[run.selectedActivation] ?? -10;
   }
 
+  function getMethodScore() {
+    const run = state.run;
+    if (!run || !run.trainingTask) {
+      return 0;
+    }
+    if (!run.selectedMethod) {
+      return -14;
+    }
+    return run.trainingTask.methodScores[run.selectedMethod] ?? -10;
+  }
+
+  function getMethodHudLabel(methodId) {
+    switch (methodId) {
+      case "sft":
+        return "SFT";
+      case "instruction":
+        return "Instr";
+      case "distillation":
+        return "Distill";
+      case "preference":
+        return "Pref";
+      default:
+        return "Unset";
+    }
+  }
+
   function computeProjectedAccuracy() {
     if (!state.run) {
       return 0;
@@ -333,8 +419,17 @@
     const modelScore = model.accuracyBias * 4;
     const difficultyPenalty = state.settings.difficultyIndex * 4;
     const threatPenalty = (run.trainingHits || 0) * 3;
+    const noisePenalty = (run.noisyPacketsCaught || 0) * 3.2;
     return clamp(
-      base + dataScore + defenseScore + modelScore + getActivationScore() - difficultyPenalty - threatPenalty,
+      base +
+        dataScore +
+        defenseScore +
+        modelScore +
+        getActivationScore() +
+        getMethodScore() -
+        difficultyPenalty -
+        threatPenalty -
+        noisePenalty,
       8,
       96
     );
@@ -344,7 +439,7 @@
     const resources = state.resources;
     const run = state.run;
     if (!resources || !run) {
-      return "Collect clean data, configure training, and defend deployment.";
+      return "Collect clean data, choose the right training recipe, and ship the model.";
     }
 
     if (state.mode === "result") {
@@ -354,13 +449,13 @@
     }
 
     if (run.stage === "collection") {
-      return `Catch at least ${run.collectionGoal} clean packets, then relay them to training.`;
+      return `Catch at least ${run.collectionGoal} quality packets. Training opens automatically when the bag is full enough.`;
     }
     if (run.stage === "training") {
-      if (!run.selectedActivation) {
-        return "Read the task card, choose an activation function, and upload the dataset.";
+      if (!run.selectedActivation || !run.selectedMethod) {
+        return "Read the task card, choose both the activation and the training method, then upload the dataset.";
       }
-      return `Upload remaining packets into the core. Current activation: ${getSelectedActivation().label}.`;
+      return `Upload remaining packets into the core. Current recipe: ${getSelectedMethod().label} + ${getSelectedActivation().label}.`;
     }
     if (!run.deploymentActive) {
       return resources.accuracy < 50
@@ -374,23 +469,26 @@
     const resources = state.resources;
     const run = state.run;
     if (!resources || !run) {
-      return "Three levels teach how clean data, activation choices, and deployment defense shape model quality.";
+      return "Three levels teach how clean data, method choice, activation choice, and rollout defense shape model quality.";
     }
     if (state.mode === "result" && state.result && state.result.lesson) {
       return state.result.lesson;
     }
     if (run.stage === "collection") {
-      return "Level 1: clean packets fall from the source. Scrambler attacks corrupt samples before they become training data.";
+      return "Level 1: collect the clean packets and avoid the corrupted noisy ones. Better data quality makes better training possible.";
     }
     if (run.stage === "training") {
-      if (!run.selectedActivation) {
-        return `Task card: ${run.trainingTask.requirement} Choose the activation that best matches that requirement.`;
+      if (!run.selectedActivation || !run.selectedMethod) {
+        return `Task card: ${run.trainingTask.requirement} Pick the training method and activation that best match the clues.`;
       }
       const selected = getSelectedActivation();
-      const isBest = selected && selected.id === run.trainingTask.recommendedActivation;
-      return isBest
-        ? `${selected.label} matches the task well. Uploading now should maximize accuracy if you protect the core.`
-        : `${selected.label} is risky for this task. You can still upload, but final accuracy will likely suffer.`;
+      const selectedMethod = getSelectedMethod();
+      const isBestActivation = selected && selected.id === run.trainingTask.recommendedActivation;
+      const isBestMethod = selectedMethod && selectedMethod.id === run.trainingTask.recommendedMethod;
+      if (isBestActivation && isBestMethod) {
+        return `${selectedMethod.label} + ${selected.label} fits this task well. Uploading now should maximize accuracy if you protect the core.`;
+      }
+      return `${selectedMethod.label} + ${selected.label} is a risky recipe for this task. Read the clues again before committing the run.`;
     }
     if (!run.deploymentActive) {
       return resources.accuracy < 50
@@ -667,6 +765,18 @@
     }
   }
 
+  function selectMethod(id, silent = false) {
+    if (!state.run || state.run.stage !== "training") {
+      return;
+    }
+    state.run.selectedMethod = id;
+    if (!silent) {
+      const option = getSelectedMethod();
+      playSound("pickup");
+      setNotice(`${option.label} selected. ${option.lesson}`, 2.2);
+    }
+  }
+
   function beginStage(stage) {
     const difficulty = getDifficulty();
     const run = state.run;
@@ -682,9 +792,10 @@
     if (stage === "collection") {
       state.player = createPlayer(640, 588);
       run.collectionCaptured = 0;
-      run.collectionCorrupted = 0;
+      run.noisyPacketsCaught = 0;
+      run.autoStageTimer = 0;
       run.collectionGoal = difficulty.collectionGoal;
-      setNotice(`Level 1: catch ${run.collectionGoal}+ clean packets, then move to the relay.`, 2.6);
+      setNotice(`Level 1: catch ${run.collectionGoal}+ clean packets and avoid noisy packets.`, 2.6);
       return;
     }
 
@@ -693,12 +804,13 @@
       run.trainingDataBudget = Math.max(run.collectionGoal, state.resources.data);
       run.uploadedPackets = 0;
       run.trainingHits = 0;
+      run.selectedMethod = null;
       state.resources.training = 0;
       state.resources.accuracy = 0;
       state.spawnTimer = difficulty.trainingThreatInterval;
       state.shardTimer = 99;
       setNotice(
-        `Level 2: choose an activation for ${run.trainingTask.label}, then upload ${run.trainingDataBudget} packets.`,
+        `Level 2: choose the method and activation for ${run.trainingTask.label}, then upload ${run.trainingDataBudget} packets.`,
         2.8
       );
       return;
@@ -732,9 +844,11 @@
       stage: "collection",
       collectionGoal: difficulty.collectionGoal,
       collectionCaptured: 0,
-      collectionCorrupted: 0,
+      noisyPacketsCaught: 0,
+      autoStageTimer: 0,
       trainingTask: pickTaskProfile(),
       selectedActivation: null,
+      selectedMethod: null,
       trainingDataBudget: 0,
       uploadedPackets: 0,
       trainingHits: 0,
@@ -765,7 +879,7 @@
       r: 12,
       pulse: rand(0, Math.PI * 2),
       tilt: rand(-0.3, 0.3),
-      clean: true,
+      clean: Math.random() > 0.25,
     });
   }
 
@@ -773,17 +887,6 @@
     const difficulty = getDifficulty();
     const stage = getStageId();
     if (stage === "collection") {
-      const fromLeft = Math.random() < 0.5;
-      state.anomalies.push({
-        type: "scrambler",
-        x: fromLeft ? 92 : BASE_WIDTH - 92,
-        y: rand(180, 470),
-        r: 17,
-        hp: 1,
-        speed: difficulty.anomalySpeed * rand(0.88, 1.12),
-        wobble: rand(0, Math.PI * 2),
-        hue: rand(0, 1),
-      });
       return;
     }
     if (stage === "training") {
@@ -853,45 +956,37 @@
     const nodes = getStageNodes();
 
     if (run.stage === "collection") {
-      if (nearStation(nodes.relay, 34)) {
-        if (resources.data >= run.collectionGoal) {
-          resources.score += 25;
-          emitRing(nodes.relay.x, nodes.relay.y, "107,214,255", 26, 110, 0.5);
-          emitParticles(nodes.relay.x, nodes.relay.y, "107,214,255", 18, 40, 180, 0.55, 5);
-          playSound("train");
-          resources.stageIndex = 1;
-          beginStage("training");
-        } else {
-          playSound("warning");
-          setNotice(`Need ${run.collectionGoal - resources.data} more clean packets before relay upload.`, 1.8);
-        }
-        return;
-      }
       playSound("warning");
-      setNotice("Catch packets from the source stream and move to the relay when the dataset is large enough.", 1.8);
+      setNotice("Just keep collecting the clean packets. Training opens automatically when the quality target is reached.", 1.6);
       return;
     }
 
     if (run.stage === "training") {
-      if (nearStation(nodes.console, 34)) {
-        const currentIndex = Math.max(
-          0,
-          ACTIVATION_OPTIONS.findIndex((option) => option.id === run.selectedActivation)
-        );
+      if (nearStation(nodes.activation, 34)) {
+        const currentIndex = Math.max(0, ACTIVATION_OPTIONS.findIndex((option) => option.id === run.selectedActivation));
         const next = ACTIVATION_OPTIONS[(currentIndex + 1) % ACTIVATION_OPTIONS.length];
         selectActivation(next.id);
         return;
       }
+      if (nearStation(nodes.method, 34)) {
+        const currentIndex = Math.max(
+          0,
+          TRAINING_METHOD_OPTIONS.findIndex((option) => option.id === run.selectedMethod)
+        );
+        const next = TRAINING_METHOD_OPTIONS[(currentIndex + 1) % TRAINING_METHOD_OPTIONS.length];
+        selectMethod(next.id);
+        return;
+      }
 
       if (nearStation(nodes.upload, 40)) {
-        if (!run.selectedActivation) {
+        if (!run.selectedActivation || !run.selectedMethod) {
           playSound("warning");
-          setNotice("Choose an activation function before uploading the dataset.", 1.8);
+          setNotice("Choose both a training method and an activation before uploading the dataset.", 1.8);
           return;
         }
         if (resources.data <= 0) {
           playSound("warning");
-          setNotice("No buffered packets remain. Protect the core until the module finalizes.", 1.6);
+          setNotice("No buffered packets remain. Wait for the module to finalize training.", 1.6);
           return;
         }
         const uploadCost = Math.max(8, getModel().computeCost - 6);
@@ -928,7 +1023,7 @@
       }
 
       playSound("warning");
-      setNotice("Move to the upload port to feed the core, or use the activation rack to change functions.", 1.8);
+      setNotice("Use the method rack, activation rack, and upload port to build the right training recipe.", 1.8);
       return;
     }
 
@@ -1295,29 +1390,40 @@
     maybeHandleButtonClick(buttons);
   }
 
-  function handleTrainingActivationHotkeys() {
+  function handleTrainingSelectionHotkeys() {
     if (!state.run || state.run.stage !== "training") {
       return;
     }
-    const bindings = ["Digit1", "Digit2", "Digit3", "Digit4"];
-    for (let i = 0; i < bindings.length; i++) {
-      if (consumePress(bindings[i])) {
+    const activationBindings = ["Digit1", "Digit2", "Digit3", "Digit4"];
+    for (let i = 0; i < activationBindings.length; i++) {
+      if (consumePress(activationBindings[i])) {
         selectActivation(ACTIVATION_OPTIONS[i].id);
+        return;
+      }
+    }
+    const methodBindings = ["KeyQ", "KeyW", "KeyE", "KeyR"];
+    for (let i = 0; i < methodBindings.length; i++) {
+      if (consumePress(methodBindings[i])) {
+        selectMethod(TRAINING_METHOD_OPTIONS[i].id);
         return;
       }
     }
   }
 
-  function handleTrainingActivationClick(click) {
+  function handleTrainingSelectionClick(click) {
     if (!click || !state.run || state.run.stage !== "training") {
       return false;
     }
-    const buttons = getActivationButtons();
+    const buttons = [...getActivationButtons(), ...getMethodButtons()];
     state.ui.activeButtons = buttons;
     resolveHover(buttons);
     for (const button of buttons) {
       if (isPointInRect(click, button.rect)) {
-        selectActivation(button.id.replace("activation_", ""));
+        if (button.id.startsWith("activation_")) {
+          selectActivation(button.id.replace("activation_", ""));
+        } else {
+          selectMethod(button.id.replace("method_", ""));
+        }
         return true;
       }
     }
@@ -1379,12 +1485,6 @@
       state.shardTimer = difficulty.dropInterval * rand(0.85, 1.18);
     }
 
-    state.spawnTimer -= dt;
-    if (state.spawnTimer <= 0) {
-      spawnAnomaly();
-      state.spawnTimer = difficulty.spawnInterval * rand(0.72, 1.02);
-    }
-
     for (let i = state.shards.length - 1; i >= 0; i--) {
       const shard = state.shards[i];
       shard.pulse += dt * 3.6;
@@ -1399,70 +1499,42 @@
       shard.y += shard.vy * dt;
       shard.vx *= 0.998;
       if (dist(player, shard) <= player.r + shard.r + 4) {
-        resources.data += 1;
-        run.collectionCaptured += 1;
-        resources.score += 6;
-        emitParticles(shard.x, shard.y, "133,243,183", 12, 40, 160, 0.42, 5);
-        emitRing(shard.x, shard.y, "133,243,183", 10, 60, 0.35);
-        playSound("pickup");
+        if (shard.clean) {
+          resources.data += 1;
+          run.collectionCaptured += 1;
+          resources.score += 6;
+          emitParticles(shard.x, shard.y, "133,243,183", 12, 40, 160, 0.42, 5);
+          emitRing(shard.x, shard.y, "133,243,183", 10, 60, 0.35);
+          playSound("pickup");
+        } else {
+          run.noisyPacketsCaught += 1;
+          resources.score = Math.max(0, resources.score - 4);
+          emitParticles(shard.x, shard.y, "255,120,140", 12, 40, 160, 0.42, 5);
+          emitRing(shard.x, shard.y, "255,120,140", 10, 60, 0.35);
+          playSound("warning");
+          setNotice("Corrupted packet caught. Keep the noisy data out of the bag.", 1.2);
+        }
         state.shards.splice(i, 1);
         continue;
       }
       if (shard.y > BASE_HEIGHT - 72) {
-        run.collectionCorrupted += 1;
         state.shards.splice(i, 1);
       }
     }
 
-    for (let i = state.anomalies.length - 1; i >= 0; i--) {
-      const anomaly = state.anomalies[i];
-      anomaly.wobble += dt * 5.6;
-
-      let target = nodes.relay;
-      let bestDistance = Infinity;
-      for (const shard of state.shards) {
-        const d = dist(anomaly, shard);
-        if (d < bestDistance) {
-          bestDistance = d;
-          target = shard;
-        }
+    if (resources.data >= run.collectionGoal) {
+      if (run.autoStageTimer <= 0) {
+        run.autoStageTimer = 1.0;
+        emitRing(nodes.sorter.x, nodes.sorter.y, "107,214,255", 28, 120, 0.55);
+        emitParticles(nodes.sorter.x, nodes.sorter.y, "107,214,255", 18, 44, 180, 0.55, 5);
+        playSound("train");
+        setNotice("Enough quality data collected. Opening the training module...", 1.1);
       }
-
-      const dx = target.x - anomaly.x;
-      const dy = target.y - anomaly.y;
-      const d = length(dx, dy) || 1;
-      anomaly.x += (dx / d) * anomaly.speed * dt;
-      anomaly.y += (dy / d) * anomaly.speed * dt;
-
-      for (let j = state.shards.length - 1; j >= 0; j--) {
-        const shard = state.shards[j];
-        if (dist(anomaly, shard) <= anomaly.r + shard.r + 2) {
-          run.collectionCorrupted += 1;
-          resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.25, 0, 100);
-          emitParticles(shard.x, shard.y, "255,120,140", 14, 36, 150, 0.5, 4);
-          emitRing(shard.x, shard.y, "255,120,140", 12, 64, 0.3);
-          playSound("damage");
-          state.shards.splice(j, 1);
-          state.anomalies.splice(i, 1);
-          setNotice("A scrambler corrupted a falling packet.", 1.2);
-          break;
-        }
+      run.autoStageTimer -= dt;
+      if (run.autoStageTimer <= 0) {
+        resources.stageIndex = 1;
+        beginStage("training");
       }
-      if (!state.anomalies[i]) {
-        continue;
-      }
-
-      if (dist(player, anomaly) <= player.r + anomaly.r + 2) {
-        resources.alignment = clamp(resources.alignment - difficulty.alignmentHit * 0.35, 0, 100);
-        emitParticles(player.x, player.y, "255,140,155", 14, 40, 130, 0.4, 4);
-        playSound("damage");
-        state.anomalies.splice(i, 1);
-        setNotice("A scrambler reached the guardian. Integrity reduced.", 1.2);
-      }
-    }
-
-    if (resources.data >= run.collectionGoal && nearStation(nodes.relay, 54)) {
-      setNotice("Dataset is large enough. Press E or B at the relay to enter training.", 1.1);
     }
   }
 
@@ -1509,7 +1581,7 @@
       }
     }
 
-    if (run.selectedActivation && resources.training < 100 && nearStation(nodes.upload, 54)) {
+    if (run.selectedActivation && run.selectedMethod && resources.training < 100 && nearStation(nodes.upload, 54)) {
       setNotice("Press E or B at the upload port to feed the training batches.", 0.9);
     }
   }
@@ -1532,24 +1604,28 @@
       if (run.deployProgress >= 100) {
         resources.deployed = true;
         const selected = getSelectedActivation();
+        const selectedMethod = getSelectedMethod();
         const recommended = ACTIVATION_OPTIONS.find(
           (option) => option.id === run.trainingTask.recommendedActivation
+        );
+        const recommendedMethod = TRAINING_METHOD_OPTIONS.find(
+          (option) => option.id === run.trainingTask.recommendedMethod
         );
         if (resources.accuracy < 50) {
           finishRun(
             false,
             `Deployment failed: accuracy ${Math.round(resources.accuracy)}% is below 50%.`,
-            selected
-              ? `${run.trainingTask.label} wanted ${recommended.label}, but ${selected.label} was chosen. The rollout defended well, but the training config was still wrong.`
-              : `No activation was set for ${run.trainingTask.label}, so the model never reached deployment quality.`
+            selected && selectedMethod
+              ? `${run.trainingTask.label} wanted ${recommendedMethod.label} + ${recommended.label}, but the run used ${selectedMethod.label} + ${selected.label}. The rollout defended well, but the training recipe was still wrong.`
+              : `The training recipe was incomplete for ${run.trainingTask.label}, so the model never reached deployment quality.`
           );
         } else {
           finishRun(
             true,
             `Agent deployed with ${Math.round(resources.accuracy)}% accuracy.`,
-            selected && selected.id === recommended.id
-              ? `The ${selected.label} choice matched the task well enough to survive rollout pressure and ship the model.`
-              : `${selected ? selected.label : "Your activation"} was not ideal for ${run.trainingTask.label}, but strong data quality and rollout defense still carried the model over the deployment threshold.`
+            selected && selectedMethod && selected.id === recommended.id && selectedMethod.id === recommendedMethod.id
+              ? `The ${selectedMethod.label} + ${selected.label} recipe matched the task well enough to survive rollout pressure and ship the model.`
+              : `${selectedMethod ? selectedMethod.label : "Your method"} + ${selected ? selected.label : "your activation"} was not ideal for ${run.trainingTask.label}, but strong data quality and rollout defense still carried the model over the deployment threshold.`
           );
         }
         return;
@@ -1602,10 +1678,10 @@
     updateEffects(dt);
 
     if (state.run.stage === "training") {
-      const buttons = getActivationButtons();
+      const buttons = [...getActivationButtons(), ...getMethodButtons()];
       state.ui.activeButtons = buttons;
       resolveHover(buttons);
-      handleTrainingActivationHotkeys();
+      handleTrainingSelectionHotkeys();
     }
 
     const horizontal =
@@ -1620,32 +1696,46 @@
     const moveY = vertical / moveLen;
 
     const speed = model.playerSpeed + squad * 6;
-    player.vx = moveX * speed;
-    player.vy = moveY * speed;
+    if (state.run.stage === "collection") {
+      player.vx = horizontal * speed;
+      player.vy = 0;
+    } else {
+      player.vx = moveX * speed;
+      player.vy = moveY * speed;
+    }
 
-    if (horizontal !== 0 || vertical !== 0) {
+    if (horizontal !== 0 || (vertical !== 0 && state.run.stage !== "collection")) {
       player.x += player.vx * dt;
       player.y += player.vy * dt;
-      player.facingX = moveX;
-      player.facingY = moveY;
+      if (state.run.stage === "collection") {
+        player.facingX = horizontal === 0 ? player.facingX : Math.sign(horizontal);
+        player.facingY = 0;
+      } else {
+        player.facingX = moveX;
+        player.facingY = moveY;
+      }
     } else {
       player.vx = 0;
       player.vy = 0;
     }
 
     player.x = clamp(player.x, player.r + 24, BASE_WIDTH - player.r - 24);
-    player.y = clamp(player.y, player.r + 94, BASE_HEIGHT - player.r - 24);
+    if (state.run.stage === "collection") {
+      player.y = 592;
+    } else {
+      player.y = clamp(player.y, player.r + 94, BASE_HEIGHT - player.r - 24);
+    }
 
     resources.compute = clamp(resources.compute + (5.2 + squad * 0.9) * dt, 0, 100);
     resources.timeLeft = Math.max(0, resources.timeLeft - dt);
     player.cooldown = Math.max(0, player.cooldown - dt);
 
-    if (consumePress("Space")) {
+    if (state.run.stage !== "collection" && consumePress("Space")) {
       emitProjectile(player.x + player.facingX * 10, player.y + player.facingY * 10);
     }
 
     const click = consumePointerClick();
-    if (click && !handleTrainingActivationClick(click)) {
+    if (click && !handleTrainingSelectionClick(click) && state.run.stage !== "collection") {
       emitProjectile(click.x, click.y);
     }
 
@@ -1789,7 +1879,7 @@
     }
   }
 
-  function drawStation(station, color, subtitle, emphasized = false) {
+  function drawStation(station, color, subtitle, emphasized = false, showText = true) {
     ctx.save();
     ctx.translate(station.x, station.y);
 
@@ -1816,20 +1906,70 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    ctx.fillStyle = "#eaf9ff";
-    ctx.font = "700 18px Space Grotesk";
-    ctx.textAlign = "center";
-    ctx.fillText(station.name, 0, station.r + 34);
+    if (showText) {
+      ctx.fillStyle = "#eaf9ff";
+      ctx.font = "700 18px Space Grotesk";
+      ctx.textAlign = "center";
+      ctx.fillText(station.name, 0, station.r + 34);
 
-    ctx.fillStyle = "#b4d8e7";
-    ctx.font = "500 13px Space Grotesk";
-    drawWrappedText(subtitle, 0, station.r + 54, 170, 15, "center");
+      ctx.fillStyle = "#b4d8e7";
+      ctx.font = "500 13px Space Grotesk";
+      drawWrappedText(subtitle, 0, station.r + 54, 170, 15, "center");
+    }
     ctx.restore();
   }
 
   function drawPlayer() {
     const p = state.player;
     if (!p) {
+      return;
+    }
+
+    if (state.run && state.run.stage === "collection") {
+      const groundY = 626;
+      ctx.save();
+      ctx.translate(p.x, groundY - 32);
+      const direction = p.facingX >= 0 ? 1 : -1;
+      const walk = Math.sin(state.timeElapsed * 10 + p.x * 0.02) * Math.min(1, Math.abs(p.vx) / 120);
+      ctx.scale(direction, 1);
+
+      ctx.fillStyle = "#6f5134";
+      ctx.fillRect(-14, 26, 10, 4);
+      ctx.fillRect(2, 26, 10, 4);
+      ctx.strokeStyle = "#d2f6ff";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(-2, -4);
+      ctx.lineTo(-8, 14 + walk * 6);
+      ctx.moveTo(6, -4);
+      ctx.lineTo(12, 14 - walk * 6);
+      ctx.moveTo(-2, 22);
+      ctx.lineTo(-10, 34 - walk * 4);
+      ctx.moveTo(8, 22);
+      ctx.lineTo(14, 34 + walk * 4);
+      ctx.stroke();
+
+      ctx.fillStyle = "#92dfff";
+      ctx.beginPath();
+      ctx.arc(2, -18, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#f0fbff";
+      ctx.fillRect(-9, -6, 22, 30);
+
+      drawPanel(-22, -2, 20, 18, "rgba(181,255,214,0.9)", "rgba(238,255,245,0.9)", 5, 2);
+      ctx.fillStyle = "#123b37";
+      ctx.fillRect(-16, 3, 10, 2);
+      ctx.fillRect(-16, 8, 8, 2);
+
+      ctx.strokeStyle = "rgba(255,220,120,0.95)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(14, 2);
+      ctx.lineTo(28, -6);
+      ctx.moveTo(14, 6);
+      ctx.lineTo(28, 12);
+      ctx.stroke();
+      ctx.restore();
       return;
     }
 
@@ -1901,17 +2041,36 @@
       ctx.translate(shard.x, shard.y);
       ctx.rotate(shard.tilt + shard.pulse * 0.15);
       if (shard.type === "drop") {
-        drawPanel(-13, -15, 26, 30, "rgba(135,243,183,0.88)", "rgba(228,255,240,0.94)", 7, 2);
-        ctx.fillStyle = "rgba(11,57,55,0.82)";
+        drawPanel(
+          -13,
+          -15,
+          26,
+          30,
+          shard.clean ? "rgba(135,243,183,0.88)" : "rgba(255,145,166,0.88)",
+          shard.clean ? "rgba(228,255,240,0.94)" : "rgba(255,235,238,0.92)",
+          7,
+          2
+        );
+        ctx.fillStyle = shard.clean ? "rgba(11,57,55,0.82)" : "rgba(74,14,25,0.88)";
         ctx.fillRect(-6, -7, 12, 2.2);
         ctx.fillRect(-6, -1, 10, 2.2);
         ctx.fillRect(-6, 5, 8, 2.2);
-        ctx.strokeStyle = "rgba(187,255,220,0.5)";
+        ctx.strokeStyle = shard.clean ? "rgba(187,255,220,0.5)" : "rgba(255,193,206,0.6)";
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         ctx.moveTo(0, -18);
         ctx.lineTo(0, -30 - Math.sin(shard.pulse) * 4);
         ctx.stroke();
+        if (!shard.clean) {
+          ctx.strokeStyle = "rgba(255,246,248,0.8)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(-5, -5);
+          ctx.lineTo(5, 5);
+          ctx.moveTo(5, -5);
+          ctx.lineTo(-5, 5);
+          ctx.stroke();
+        }
       } else {
         drawPanel(-12, -14, 24, 28, "rgba(135,243,183,0.84)", "rgba(228,255,240,0.94)", 7, 2);
       }
@@ -2063,19 +2222,50 @@
 
     drawStation(nodes.source, "#6bd6ff", "Packets drop continuously from the upstream source.", false);
     drawStation(
-      nodes.relay,
+      nodes.sorter,
       "#9fe6ff",
-      resources.data >= run.collectionGoal ? "Dataset ready. Press E/B to relay into training." : `Need ${run.collectionGoal} clean packets.`,
-      nearStation(nodes.relay, 34)
+      resources.data >= run.collectionGoal
+        ? "Enough quality data. Switching to training..."
+        : `Need ${run.collectionGoal} quality packets.`,
+      false
     );
 
-    drawPanel(102, 180, 290, 88, "rgba(12,43,64,0.64)", "rgba(126,214,255,0.36)", 18, 2);
+    ctx.strokeStyle = "rgba(153,231,255,0.42)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(96, 626);
+    ctx.lineTo(1188, 626);
+    ctx.stroke();
+
+    drawPanel(102, 180, 320, 96, "rgba(12,43,64,0.64)", "rgba(126,214,255,0.36)", 18, 2);
     ctx.fillStyle = "#e5faff";
     ctx.font = "700 16px Space Grotesk";
-    ctx.fillText("Source Rule", 124, 210);
+    ctx.fillText("Collection Rule", 124, 210);
     ctx.fillStyle = "#a9d7ea";
     ctx.font = "500 13px Space Grotesk";
-    drawWrappedText("Catch falling clean packets before scramblers corrupt them. More clean data gives better training headroom.", 124, 234, 244, 16, "left");
+    drawWrappedText("Walk under the clean packets and catch them in the bag. Let the corrupted noisy packets fall past you.", 124, 234, 270, 16, "left");
+
+    drawPanel(914, 180, 236, 110, "rgba(11,39,58,0.72)", "rgba(129,213,255,0.34)", 18, 2);
+    ctx.fillStyle = "#e8fbff";
+    ctx.font = "700 15px Space Grotesk";
+    ctx.fillText("Quality Meter", 936, 208);
+    ctx.fillStyle = "#9fd8ea";
+    ctx.font = "500 13px Space Grotesk";
+    ctx.fillText(`Clean packets: ${run.collectionCaptured}`, 936, 234);
+    ctx.fillText(`Noisy packets caught: ${run.noisyPacketsCaught}`, 936, 256);
+    ctx.fillText(`Goal: ${run.collectionGoal}`, 936, 278);
+
+    drawPanel(934, 296, 196, 18, "rgba(16,56,77,0.82)", "rgba(161,236,255,0.34)", 10, 1.5);
+    drawPanel(
+      936,
+      298,
+      clamp((196 * resources.data) / Math.max(1, run.collectionGoal), 0, 196),
+      14,
+      "rgba(159,255,214,0.85)",
+      null,
+      8,
+      0
+    );
   }
 
   function drawTrainingInterface() {
@@ -2084,27 +2274,39 @@
     const projected = Math.round(computeProjectedAccuracy());
 
     drawPanel(78, 138, 1140, 484, "rgba(6,24,40,0.34)", "rgba(157,225,246,0.18)", 24, 2);
-    drawPanel(84, 166, 296, 224, "rgba(11,39,58,0.78)", "rgba(129,213,255,0.34)", 18, 2);
+    drawPanel(84, 166, 312, 248, "rgba(11,39,58,0.78)", "rgba(129,213,255,0.34)", 18, 2);
     ctx.fillStyle = "#e7fbff";
     ctx.font = "700 17px Space Grotesk";
     ctx.fillText("Task Requirement", 108, 198);
     ctx.fillStyle = "#d3eff8";
     ctx.font = "700 20px Space Grotesk";
-    drawWrappedText(run.trainingTask.label, 108, 228, 240, 22, "left");
+    drawWrappedText(run.trainingTask.label, 108, 228, 254, 22, "left");
     ctx.fillStyle = "#a8d7e7";
     ctx.font = "500 13px Space Grotesk";
-    drawWrappedText(run.trainingTask.requirement, 108, 286, 240, 16, "left");
+    drawWrappedText(run.trainingTask.requirement, 108, 286, 254, 16, "left");
     ctx.fillStyle = "#8cd0e6";
-    drawWrappedText(`Hint: ${run.trainingTask.clue}`, 108, 350, 240, 16, "left");
+    drawWrappedText(`Activation hint: ${run.trainingTask.clue}`, 108, 348, 254, 16, "left");
+    drawWrappedText(`Method hint: ${run.trainingTask.methodClue}`, 108, 394, 254, 16, "left");
 
-    drawStation(nodes.upload, "#77e0ff", "Press E/B to upload a training batch.", nearStation(nodes.upload, 34));
+    drawStation(nodes.upload, "#77e0ff", "Press E/B to upload the next training batch.", nearStation(nodes.upload, 34));
     drawStation(
       nodes.core,
       "#8cffb0",
       `Projected final accuracy: ${projected}%`,
       nearStation(nodes.core, 34)
     );
-    drawStation(nodes.console, "#ffd37e", "Choose the right activation using click or 1-4.", nearStation(nodes.console, 34));
+    drawStation(nodes.activation, "#ffd37e", "", nearStation(nodes.activation, 34), false);
+    drawStation(nodes.method, "#9fd6ff", "", nearStation(nodes.method, 34), false);
+
+    drawPanel(936, 136, 286, 24, "rgba(10,37,57,0.8)", "rgba(255,219,148,0.44)", 10, 1.5);
+    ctx.fillStyle = "#f5fbff";
+    ctx.font = "700 14px Space Grotesk";
+    ctx.fillText("Activation Rack  |  1-4 or click", 954, 152);
+
+    drawPanel(936, 396, 286, 24, "rgba(10,37,57,0.8)", "rgba(173,226,255,0.42)", 10, 1.5);
+    ctx.fillStyle = "#f5fbff";
+    ctx.font = "700 14px Space Grotesk";
+    ctx.fillText("Training Method Rack  |  Q/W/E/R", 954, 412);
 
     ctx.strokeStyle = "rgba(145, 226, 255, 0.38)";
     ctx.lineWidth = 2.5;
@@ -2112,14 +2314,16 @@
     ctx.beginPath();
     ctx.moveTo(nodes.upload.x + 70, nodes.upload.y - 28);
     ctx.lineTo(nodes.core.x - 90, nodes.core.y + 24);
-    ctx.lineTo(nodes.console.x - 74, nodes.console.y - 16);
+    ctx.lineTo(nodes.activation.x - 74, nodes.activation.y - 16);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    const buttons = getActivationButtons();
+    const buttons = [...getActivationButtons(), ...getMethodButtons()];
     state.ui.activeButtons = buttons;
     for (const button of buttons) {
-      const active = state.run.selectedActivation === button.id.replace("activation_", "");
+      const active = button.id.startsWith("activation_")
+        ? state.run.selectedActivation === button.id.replace("activation_", "")
+        : state.run.selectedMethod === button.id.replace("method_", "");
       const hovered = state.ui.hoverButtonId === button.id;
       drawPanel(
         button.rect.x,
@@ -2132,7 +2336,9 @@
             ? "rgba(123,235,196,0.26)"
             : "rgba(16,56,77,0.66)",
         active
-          ? "rgba(255,243,211,0.92)"
+          ? button.id.startsWith("activation_")
+            ? "rgba(255,243,211,0.92)"
+            : "rgba(210,240,255,0.92)"
           : hovered
             ? "rgba(182,253,229,0.82)"
             : "rgba(121,190,220,0.52)",
@@ -2140,11 +2346,11 @@
         active ? 3 : 2
       );
       ctx.fillStyle = "#effbff";
-      ctx.font = "700 18px Space Grotesk";
-      ctx.fillText(button.label, button.rect.x + 18, button.rect.y + 26);
+      ctx.font = "700 15px Space Grotesk";
+      ctx.fillText(button.label, button.rect.x + 16, button.rect.y + 22);
       ctx.fillStyle = "#a5d8ea";
-      ctx.font = "500 12px Space Grotesk";
-      drawWrappedText(button.lesson, button.rect.x + 18, button.rect.y + 44, button.rect.w - 30, 14, "left");
+      ctx.font = "500 11px Space Grotesk";
+      drawWrappedText(button.lesson, button.rect.x + 16, button.rect.y + 38, button.rect.w - 28, 13, "left");
     }
   }
 
@@ -2209,11 +2415,13 @@
     ctx.font = "500 12px Space Grotesk";
     ctx.fillText(`Learn: ${model.microLesson}`, 42, 96);
 
-    let stageChip = `Goal ${getCollectionGoal()} packets`;
+    let stageChip = `Goal ${getCollectionGoal()} quality packets`;
     if (run.stage === "training") {
-      stageChip = run.selectedActivation
-        ? `Act ${getSelectedActivation().label} | Upload ${run.uploadedPackets}/${run.trainingDataBudget}`
-        : `Activation unset | Upload ${run.uploadedPackets}/${run.trainingDataBudget}`;
+      if (run.selectedMethod && run.selectedActivation) {
+        stageChip = `${getMethodHudLabel(run.selectedMethod)} + ${getSelectedActivation().label}`;
+      } else {
+        stageChip = "Recipe pending";
+      }
     } else if (run.stage === "deployment") {
       stageChip = run.deploymentActive
         ? `Rollout ${Math.round(run.deployProgress)}%`
@@ -2266,9 +2474,11 @@
     ctx.font = "500 13px Space Grotesk";
     drawWrappedText(getLearningPrompt(), 42, BASE_HEIGHT - 106, 372, 16, "left");
 
-    const controlLine = run.stage === "training"
-      ? "Move: Arrows/WASD  Fire: Space/Click  Interact: E/B  Set Activation: 1-4 or click  Pause: Esc/P"
-      : "Move: Arrows/WASD  Fire Epoch Burst: Space/Click  Interact: E/B  Pause: Esc/P  Fullscreen: F";
+    const controlLine = run.stage === "collection"
+      ? "Move: Left/Right or A/D  Catch clean packets  Avoid noisy packets  Pause: Esc/P  Fullscreen: F"
+      : run.stage === "training"
+        ? "Move: Arrows/WASD  Fire: Space/Click  Interact: E/B  Activation: 1-4 or click  Method: Q/W/E/R or click"
+        : "Move: Arrows/WASD  Fire Epoch Burst: Space/Click  Interact: E/B  Pause: Esc/P  Fullscreen: F";
     ctx.fillStyle = "rgba(208, 240, 255, 0.82)";
     ctx.font = "500 13px Space Grotesk";
     ctx.fillText(controlLine, 32, BASE_HEIGHT - 12);
@@ -2453,18 +2663,18 @@
       "You run Agent Forge, an AI operations lab under a strict launch window.",
       "",
       "Flow:",
-      "1. Level 1: clean packets drop from the source stream. Catch them before scramblers corrupt the dataset.",
-      "2. Move to the collection relay once you have enough clean packets to build a training set.",
-      "3. Level 2: read the random task brief and choose an activation function that fits it.",
-      "4. Upload packets into the training core while defending against gradient spikes.",
-      "5. The better your activation choice, the higher the final training accuracy.",
-      "6. Level 3: start rollout at the serve gateway and defend against deployment attacks.",
-      "7. Accuracy below 50% still fails deployment even if you survive the last defense phase.",
+      "1. Level 1: clean and corrupted packets fall from the source stream.",
+      "2. Walk under the clean packets with your data bag and avoid catching the noisy ones.",
+      "3. Once enough quality data is collected, the game automatically opens the training page.",
+      "4. Level 2: read the scenario card, then choose the right training method and activation.",
+      "5. The right recipe depends on the task clues: labels, instructions, teacher outputs, or preferences.",
+      "6. Upload the curated data into the training core and watch the projected accuracy change.",
+      "7. Level 3: start rollout at the serve gateway and defend deployment quality in production.",
       "",
       "Concept tie-in:",
-      "- Data quality gates the whole pipeline. Bad or missing packets reduce what training can learn.",
-      "- Activation functions matter: the right non-linearity depends on the task requirement.",
-      "- Deployment is its own discipline. Good models can still fail when rollout defenses collapse.",
+      "- Data quality gates the whole pipeline. Noisy packets weaken what the model can learn.",
+      "- Training methods matter: supervised, instruction, distillation, and preference training fit different data.",
+      "- Activation functions matter too: the right non-linearity depends on what the task needs internally.",
       "",
       "Real model references:",
       "- Llama 3.1 8B (Meta): open weights and efficient adaptation.",
@@ -2640,8 +2850,10 @@
     const run = state.run || {
       stage: "collection",
       collectionGoal: getDifficulty().collectionGoal,
+      noisyPacketsCaught: 0,
       trainingTask: pickTaskProfile(),
       selectedActivation: null,
+      selectedMethod: null,
       trainingDataBudget: 0,
       uploadedPackets: 0,
       deployProgress: 0,
@@ -2693,6 +2905,7 @@
         score: Math.round(resources.score),
         time_left_seconds: Number(resources.timeLeft.toFixed(1)),
         collection_goal: run.collectionGoal || 0,
+        noisy_packets_caught: run.noisyPacketsCaught || 0,
         uploaded_packets: run.uploadedPackets || 0,
         training_budget: run.trainingDataBudget || 0,
         deploy_progress: Math.round(run.deployProgress || 0),
@@ -2702,13 +2915,19 @@
         requirement: run.trainingTask ? run.trainingTask.requirement : null,
         clue: run.trainingTask ? run.trainingTask.clue : null,
         selected_activation: run.selectedActivation,
+        selected_method: run.selectedMethod,
         activation_options: ACTIVATION_OPTIONS.map((option) => option.label),
+        method_options: TRAINING_METHOD_OPTIONS.map((option) => option.label),
       },
       stage_nodes: Object.fromEntries(
         Object.entries(nodes).map(([key, value]) => [key, { x: Math.round(value.x), y: Math.round(value.y) }])
       ),
       entities: {
-        shards: state.shards.slice(0, 8).map((s) => ({ x: Math.round(s.x), y: Math.round(s.y) })),
+        shards: state.shards.slice(0, 8).map((s) => ({
+          x: Math.round(s.x),
+          y: Math.round(s.y),
+          quality: s.clean === false ? "corrupted" : "clean",
+        })),
         anomalies: state.anomalies.slice(0, 8).map((a) => ({ x: Math.round(a.x), y: Math.round(a.y) })),
         projectiles: state.projectiles.slice(0, 8).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) })),
       },
