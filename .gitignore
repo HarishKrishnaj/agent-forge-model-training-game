@@ -2,3 +2,5 @@
 node_modules/
 output/
 .vercel
+playwright-report/
+test-results/
