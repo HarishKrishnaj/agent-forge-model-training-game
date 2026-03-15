@@ -189,6 +189,44 @@
 
   const SQUAD_OPTIONS = [2, 3, 4, 5];
 
+  const ACHIEVEMENTS = [
+    {
+      id: "clean_collector",
+      label: "Clean Collector",
+      desc: "Complete Level 1 with zero corrupted packets caught.",
+    },
+    {
+      id: "recipe_expert",
+      label: "Recipe Expert",
+      desc: "Choose the optimal activation and method for the given task.",
+    },
+    {
+      id: "top_deployer",
+      label: "Top Deployer",
+      desc: "Deploy a model reaching 80% accuracy or higher.",
+    },
+    {
+      id: "task_scholar",
+      label: "Task Scholar",
+      desc: "Complete all four training task profiles successfully.",
+    },
+    {
+      id: "speed_deploy",
+      label: "Speed Deployer",
+      desc: "Win a run with 60 or more seconds left on the clock.",
+    },
+    {
+      id: "high_scorer",
+      label: "High Scorer",
+      desc: "Finish a run with a score of 500 or higher.",
+    },
+    {
+      id: "model_tester",
+      label: "Model Tester",
+      desc: "Run a simulation with all three model families.",
+    },
+  ];
+
   const state = {
     mode: "main_menu",
     manualAdvance: false,
@@ -231,6 +269,14 @@
     spawnTimer: 0,
     shardTimer: 0,
     result: null,
+    achievements: [],
+    achievementsThisRun: [],
+    codex: {
+      tasksCompleted: [],
+      modelsUsed: [],
+      activationsCorrect: [],
+      methodsCorrect: [],
+    },
     timeElapsed: 0,
     audio: {
       context: null,
@@ -524,6 +570,109 @@
     state.audio.unlocked = true;
   }
 
+  function loadPersistentData() {
+    try {
+      const raw = localStorage.getItem("agentForgeData");
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      state.achievements = Array.isArray(data.achievements) ? data.achievements : [];
+      state.codex.tasksCompleted = Array.isArray(data.tasksCompleted) ? data.tasksCompleted : [];
+      state.codex.modelsUsed = Array.isArray(data.modelsUsed) ? data.modelsUsed : [];
+      state.codex.activationsCorrect = Array.isArray(data.activationsCorrect)
+        ? data.activationsCorrect
+        : [];
+      state.codex.methodsCorrect = Array.isArray(data.methodsCorrect) ? data.methodsCorrect : [];
+    } catch (e) {
+      console.warn("[AgentForge] Failed to load persistent data:", e);
+    }
+  }
+
+  function savePersistentData() {
+    try {
+      localStorage.setItem(
+        "agentForgeData",
+        JSON.stringify({
+          achievements: state.achievements,
+          tasksCompleted: state.codex.tasksCompleted,
+          modelsUsed: state.codex.modelsUsed,
+          activationsCorrect: state.codex.activationsCorrect,
+          methodsCorrect: state.codex.methodsCorrect,
+        })
+      );
+    } catch (e) {
+      console.warn("[AgentForge] Failed to save persistent data:", e);
+    }
+  }
+
+  function unlockAchievement(id) {
+    if (state.achievements.includes(id)) {
+      return false;
+    }
+    state.achievements.push(id);
+    state.achievementsThisRun.push(id);
+    savePersistentData();
+    return true;
+  }
+
+  function checkRunAchievements(victory) {
+    const run = state.run;
+    const resources = state.resources;
+    const model = getModel();
+
+    if (!state.codex.modelsUsed.includes(model.label)) {
+      state.codex.modelsUsed.push(model.label);
+      savePersistentData();
+    }
+
+    if (MODEL_OPTIONS.every((m) => state.codex.modelsUsed.includes(m.label))) {
+      unlockAchievement("model_tester");
+    }
+
+    if (!victory) return;
+
+    if (run.noisyPacketsCaught === 0) {
+      unlockAchievement("clean_collector");
+    }
+
+    const selected = getSelectedActivation();
+    const selectedMethod = getSelectedMethod();
+    const task = run.trainingTask;
+    if (selected && selectedMethod && task) {
+      const activationCorrect = selected.id === task.recommendedActivation;
+      const methodCorrect = selectedMethod.id === task.recommendedMethod;
+      if (activationCorrect && methodCorrect) {
+        unlockAchievement("recipe_expert");
+        if (!state.codex.activationsCorrect.includes(selected.id)) {
+          state.codex.activationsCorrect.push(selected.id);
+        }
+        if (!state.codex.methodsCorrect.includes(selectedMethod.id)) {
+          state.codex.methodsCorrect.push(selectedMethod.id);
+        }
+        savePersistentData();
+      }
+    }
+
+    if (resources.accuracy >= 80) {
+      unlockAchievement("top_deployer");
+    }
+
+    if (task && !state.codex.tasksCompleted.includes(task.id)) {
+      state.codex.tasksCompleted.push(task.id);
+      savePersistentData();
+    }
+    if (state.codex.tasksCompleted.length >= TASK_PROFILES.length) {
+      unlockAchievement("task_scholar");
+    }
+
+    if (resources.timeLeft >= 60) {
+      unlockAchievement("speed_deploy");
+    }
+
+    if (resources.score >= 500) {
+      unlockAchievement("high_scorer");
+    }
+  }
+
   function playSound(name) {
     if (!state.settings.soundEnabled) {
       return;
@@ -760,8 +909,15 @@
     state.run.selectedActivation = id;
     if (!silent) {
       const option = getSelectedActivation();
-      playSound("pickup");
-      setNotice(`${option.label} selected. ${option.lesson}`, 2.2);
+      const task = state.run.trainingTask;
+      const isMatch = task && option.id === task.recommendedActivation;
+      playSound(isMatch ? "train" : "pickup");
+      setNotice(
+        isMatch
+          ? `${option.label} looks like the right fit. ${option.lesson}`
+          : `${option.label} selected. ${option.lesson}`,
+        2.2
+      );
     }
   }
 
@@ -772,8 +928,15 @@
     state.run.selectedMethod = id;
     if (!silent) {
       const option = getSelectedMethod();
-      playSound("pickup");
-      setNotice(`${option.label} selected. ${option.lesson}`, 2.2);
+      const task = state.run.trainingTask;
+      const isMatch = task && option.id === task.recommendedMethod;
+      playSound(isMatch ? "train" : "pickup");
+      setNotice(
+        isMatch
+          ? `${option.label} looks like the right approach. ${option.lesson}`
+          : `${option.label} selected. ${option.lesson}`,
+        2.2
+      );
     }
   }
 
@@ -1047,6 +1210,33 @@
     state.mode = "result";
     state.ui.notice = "";
     state.ui.noticeTimer = 0;
+
+    const selected = getSelectedActivation();
+    const selectedMethod = getSelectedMethod();
+    const task = state.run ? state.run.trainingTask : null;
+    let recipeBonus = 0;
+    let recipeVerdict = null;
+    if (selected && selectedMethod && task) {
+      const activationCorrect = selected.id === task.recommendedActivation;
+      const methodCorrect = selectedMethod.id === task.recommendedMethod;
+      if (activationCorrect) recipeBonus += 75;
+      if (methodCorrect) recipeBonus += 75;
+      if (activationCorrect && methodCorrect) recipeBonus += 50;
+      state.resources.score += recipeBonus;
+      const idealActivation = ACTIVATION_OPTIONS.find((a) => a.id === task.recommendedActivation);
+      const idealMethod = TRAINING_METHOD_OPTIONS.find((m) => m.id === task.recommendedMethod);
+      recipeVerdict = {
+        correct: activationCorrect && methodCorrect,
+        text:
+          activationCorrect && methodCorrect
+            ? `Optimal recipe: ${selectedMethod.label} + ${selected.label} was the best fit for ${task.label}.`
+            : `Suboptimal recipe for ${task.label}: the ideal was ${idealMethod ? idealMethod.label : "?"} + ${idealActivation ? idealActivation.label : "?"}.`,
+      };
+    }
+
+    state.achievementsThisRun = [];
+    checkRunAchievements(victory);
+
     state.result = {
       victory,
       reason,
@@ -1055,16 +1245,19 @@
       accuracy: state.resources.accuracy,
       remainingTime: Math.max(0, state.resources.timeLeft),
       lesson,
+      recipeBonus,
+      recipeVerdict,
+      achievementsEarned: [...state.achievementsThisRun],
     };
     state.ui.resultIndex = 0;
   }
 
   function getMainMenuButtons() {
     const x = BASE_WIDTH / 2 - 180;
-    const y = 318;
+    const y = 300;
     const w = 360;
-    const h = 58;
-    const gap = 16;
+    const h = 54;
+    const gap = 12;
     return [
       {
         id: "start",
@@ -1089,6 +1282,14 @@
         rect: { x, y: y + 2 * (h + gap), w, h },
         action: () => {
           state.mode = "briefing";
+        },
+      },
+      {
+        id: "codex",
+        label: `Knowledge Codex  [${state.achievements.length}/${ACHIEVEMENTS.length}]`,
+        rect: { x, y: y + 3 * (h + gap), w, h },
+        action: () => {
+          state.mode = "codex";
         },
       },
     ];
@@ -1162,6 +1363,19 @@
         id: "briefing_back",
         label: "Back",
         rect: { x: BASE_WIDTH / 2 - 120, y: 608, w: 240, h: 54 },
+        action: () => {
+          state.mode = "main_menu";
+        },
+      },
+    ];
+  }
+
+  function getCodexButtons() {
+    return [
+      {
+        id: "codex_back",
+        label: "Back",
+        rect: { x: BASE_WIDTH / 2 - 120, y: 648, w: 240, h: 50 },
         action: () => {
           state.mode = "main_menu";
         },
@@ -1343,6 +1557,19 @@
 
   function updateBriefing() {
     const buttons = getBriefingButtons();
+    state.ui.activeButtons = buttons;
+    resolveHover(buttons);
+
+    if (consumePress("Enter", "Space", "Escape", "KeyB")) {
+      state.mode = "main_menu";
+      return;
+    }
+
+    maybeHandleButtonClick(buttons);
+  }
+
+  function updateCodex() {
+    const buttons = getCodexButtons();
     state.ui.activeButtons = buttons;
     resolveHover(buttons);
 
@@ -1805,6 +2032,10 @@
     }
     if (state.mode === "briefing") {
       updateBriefing();
+      return;
+    }
+    if (state.mode === "codex") {
+      updateCodex();
       return;
     }
     if (state.mode === "playing") {
@@ -2539,41 +2770,29 @@
     drawPanel(170, 74, 940, 572, "rgba(6,24,40,0.72)", "rgba(164,229,255,0.5)", 24, 2);
 
     ctx.fillStyle = "#d2f7ff";
-    ctx.font = "800 66px Syne";
+    ctx.font = "800 62px Syne";
     ctx.textAlign = "center";
-    ctx.fillText("Agent Forge", BASE_WIDTH / 2, 194);
+    ctx.fillText("Agent Forge", BASE_WIDTH / 2, 182);
 
     ctx.fillStyle = "#95d9f3";
-    ctx.font = "600 25px Space Grotesk";
-    ctx.fillText("Model Training Operations", BASE_WIDTH / 2, 236);
+    ctx.font = "600 24px Space Grotesk";
+    ctx.fillText("Model Training Operations", BASE_WIDTH / 2, 220);
 
     ctx.fillStyle = "#caebf8";
-    ctx.font = "500 18px Space Grotesk";
+    ctx.font = "500 17px Space Grotesk";
     ctx.fillText(
       "Run a three-level AI pipeline: collect data, configure training, and survive deployment.",
       BASE_WIDTH / 2,
-      276
+      256
     );
 
     ctx.fillStyle = "#9cd5ea";
-    ctx.font = "500 15px Space Grotesk";
-    ctx.fillText("Learn model tradeoffs, activation functions, and rollout defense while firing epoch bursts.", BASE_WIDTH / 2, 302);
-
-    const model = getModel();
-    const difficulty = getDifficulty();
-    const squad = getSquadSize();
-    drawPanel(250, 536, 780, 84, "rgba(80,168,204,0.26)", "rgba(156,221,246,0.36)", 18, 2);
-    ctx.fillStyle = "#e4f9ff";
-    ctx.font = "600 16px Space Grotesk";
-    ctx.fillText(
-      `Current Build: ${model.label} | ${difficulty.label} | Squad ${squad}`,
-      BASE_WIDTH / 2,
-      564
-    );
-
-    ctx.fillStyle = "#bde7f7";
     ctx.font = "500 14px Space Grotesk";
-    ctx.fillText(`Model Spotlight: ${model.lesson}`, BASE_WIDTH / 2, 590);
+    ctx.fillText(
+      "Learn model tradeoffs, activation functions, and rollout defense. Earn badges as you master each concept.",
+      BASE_WIDTH / 2,
+      278
+    );
 
     const buttons = getMainMenuButtons();
     state.ui.activeButtons = buttons;
@@ -2581,9 +2800,20 @@
       drawButton(buttons[i], state.ui.mainMenuIndex === i);
     }
 
+    const earned = state.achievements.length;
+    const total = ACHIEVEMENTS.length;
+    drawPanel(BASE_WIDTH / 2 - 200, 580, 400, 42, "rgba(80,168,204,0.22)", "rgba(156,221,246,0.34)", 12, 1.5);
+    ctx.fillStyle = "#e4f9ff";
+    ctx.font = "600 15px Space Grotesk";
+    ctx.fillText(
+      `Achievements: ${earned}/${total}  |  ${getModel().label}  |  ${getDifficulty().label}`,
+      BASE_WIDTH / 2,
+      606
+    );
+
     ctx.fillStyle = "rgba(188, 228, 246, 0.85)";
-    ctx.font = "500 14px Space Grotesk";
-    ctx.fillText("Use Arrow keys + Enter or click. Press F for fullscreen.", BASE_WIDTH / 2, 628);
+    ctx.font = "500 13px Space Grotesk";
+    ctx.fillText("Arrow keys + Enter or click. F = fullscreen.", BASE_WIDTH / 2, 636);
     ctx.textAlign = "left";
   }
 
@@ -2701,6 +2931,125 @@
     ctx.textAlign = "left";
   }
 
+  function drawCodex() {
+    drawBackground();
+
+    drawPanel(28, 52, 1224, 654, "rgba(8,26,38,0.82)", "rgba(169,232,255,0.5)", 24, 2);
+
+    ctx.fillStyle = "#ddfbff";
+    ctx.font = "800 46px Syne";
+    ctx.textAlign = "center";
+    ctx.fillText("Knowledge Codex", BASE_WIDTH / 2, 128);
+
+    ctx.fillStyle = "#9cd5ea";
+    ctx.font = "500 16px Space Grotesk";
+    ctx.fillText(
+      `Your AI learning progress  —  ${state.achievements.length}/${ACHIEVEMENTS.length} achievements earned`,
+      BASE_WIDTH / 2,
+      158
+    );
+
+    ctx.textAlign = "left";
+
+    const leftX = 54;
+    const rightX = 668;
+    const colW = 566;
+    let ly = 190;
+    let ry = 190;
+
+    function sectionHeader(x, y, title) {
+      ctx.fillStyle = "#7fe8ff";
+      ctx.font = "700 15px Space Grotesk";
+      ctx.fillText(title, x, y);
+      ctx.strokeStyle = "rgba(127,232,255,0.28)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y + 6);
+      ctx.lineTo(x + colW, y + 6);
+      ctx.stroke();
+      return y + 22;
+    }
+
+    function conceptRow(x, y, label, lesson, mastered) {
+      const icon = mastered ? "✓" : "·";
+      const iconColor = mastered ? "#7bffb0" : "rgba(180,210,230,0.5)";
+      ctx.fillStyle = iconColor;
+      ctx.font = "700 15px Space Grotesk";
+      ctx.fillText(icon, x, y + 14);
+      ctx.fillStyle = mastered ? "#e8fbff" : "#8ab8ce";
+      ctx.font = "600 14px Space Grotesk";
+      ctx.fillText(label, x + 18, y + 14);
+      ctx.fillStyle = mastered ? "#9fd5e8" : "rgba(155,195,215,0.6)";
+      ctx.font = "500 12px Space Grotesk";
+      drawWrappedText(lesson, x + 18, y + 28, colW - 28, 14, "left");
+      return y + 46;
+    }
+
+    function simpleRow(x, y, label, done) {
+      const icon = done ? "✓" : "·";
+      ctx.fillStyle = done ? "#7bffb0" : "rgba(180,210,230,0.5)";
+      ctx.font = "700 14px Space Grotesk";
+      ctx.fillText(icon, x, y + 13);
+      ctx.fillStyle = done ? "#e4f9ff" : "#7aa8be";
+      ctx.font = "500 13px Space Grotesk";
+      ctx.fillText(label, x + 18, y + 13);
+      return y + 24;
+    }
+
+    ly = sectionHeader(leftX, ly, "Activation Functions");
+    for (const opt of ACTIVATION_OPTIONS) {
+      ly = conceptRow(
+        leftX,
+        ly,
+        opt.label,
+        opt.lesson,
+        state.codex.activationsCorrect.includes(opt.id)
+      );
+    }
+    ly += 8;
+    ly = sectionHeader(leftX, ly, "Training Methods");
+    for (const opt of TRAINING_METHOD_OPTIONS) {
+      ly = conceptRow(
+        leftX,
+        ly,
+        opt.label,
+        opt.lesson,
+        state.codex.methodsCorrect.includes(opt.id)
+      );
+    }
+
+    ry = sectionHeader(rightX, ry, "Model Families Used");
+    for (const m of MODEL_OPTIONS) {
+      ry = simpleRow(rightX, ry, `${m.label} (${m.org})`, state.codex.modelsUsed.includes(m.label));
+    }
+    ry += 10;
+    ry = sectionHeader(rightX, ry, "Task Profiles Completed");
+    for (const t of TASK_PROFILES) {
+      ry = simpleRow(rightX, ry, t.label, state.codex.tasksCompleted.includes(t.id));
+    }
+    ry += 10;
+    ry = sectionHeader(rightX, ry, "Achievements");
+    for (const ach of ACHIEVEMENTS) {
+      const earned = state.achievements.includes(ach.id);
+      const icon = earned ? "✓" : "·";
+      ctx.fillStyle = earned ? "#7bffb0" : "rgba(180,210,230,0.5)";
+      ctx.font = "700 14px Space Grotesk";
+      ctx.fillText(icon, rightX, ry + 13);
+      ctx.fillStyle = earned ? "#e4f9ff" : "#6a98ae";
+      ctx.font = "600 13px Space Grotesk";
+      ctx.fillText(ach.label, rightX + 18, ry + 13);
+      ctx.fillStyle = earned ? "#8fcde2" : "rgba(130,175,200,0.5)";
+      ctx.font = "500 11px Space Grotesk";
+      drawWrappedText(ach.desc, rightX + 18, ry + 26, colW - 28, 13, "left");
+      ry += 42;
+    }
+
+    const buttons = getCodexButtons();
+    state.ui.activeButtons = buttons;
+    drawButton(buttons[0], true);
+    ctx.textAlign = "left";
+  }
+
   function drawPausedOverlay() {
     ctx.fillStyle = "rgba(5, 16, 24, 0.7)";
     ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
@@ -2733,16 +3082,19 @@
       training: 0,
       accuracy: 0,
       remainingTime: 0,
+      recipeBonus: 0,
+      recipeVerdict: null,
+      achievementsEarned: [],
     };
 
     ctx.fillStyle = "rgba(6, 17, 27, 0.74)";
     ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
 
     drawPanel(
-      292,
-      116,
-      696,
-      492,
+      262,
+      88,
+      756,
+      564,
       "rgba(10,33,48,0.95)",
       result.victory ? "rgba(174,251,205,0.9)" : "rgba(255,195,196,0.9)",
       24,
@@ -2750,19 +3102,19 @@
     );
 
     ctx.fillStyle = result.victory ? "#dbffe8" : "#ffe7e7";
-    ctx.font = "800 44px Syne";
+    ctx.font = "800 42px Syne";
     ctx.textAlign = "center";
-    ctx.fillText(result.victory ? "Deployment Success" : "Run Failed", BASE_WIDTH / 2, 188);
+    ctx.fillText(result.victory ? "Deployment Success" : "Run Failed", BASE_WIDTH / 2, 162);
 
     ctx.fillStyle = "#d6eff9";
-    ctx.font = "600 22px Space Grotesk";
-    const reasonLineCount = drawWrappedText(result.reason, BASE_WIDTH / 2, 236, 560, 28, "center");
+    ctx.font = "600 21px Space Grotesk";
+    const reasonLineCount = drawWrappedText(result.reason, BASE_WIDTH / 2, 206, 580, 26, "center");
 
     ctx.fillStyle = "#bfe3f5";
-    ctx.font = "500 21px Space Grotesk";
-    const metricsStartY = 236 + reasonLineCount * 28 + 22;
-    const metricLineHeight = 34;
-    ctx.fillText(`Score: ${Math.round(result.score)}`, BASE_WIDTH / 2, metricsStartY);
+    ctx.font = "500 19px Space Grotesk";
+    const metricsStartY = 206 + reasonLineCount * 26 + 18;
+    const metricLineHeight = 30;
+    ctx.fillText(`Score: ${Math.round(result.score)}${result.recipeBonus > 0 ? ` (+${result.recipeBonus} recipe bonus)` : ""}`, BASE_WIDTH / 2, metricsStartY);
     ctx.fillText(`Accuracy: ${Math.round(result.accuracy)}%`, BASE_WIDTH / 2, metricsStartY + metricLineHeight);
     ctx.fillText(`Training: ${Math.round(result.training)}%`, BASE_WIDTH / 2, metricsStartY + metricLineHeight * 2);
     ctx.fillText(
@@ -2771,25 +3123,55 @@
       metricsStartY + metricLineHeight * 3
     );
 
-    const lessonY = metricsStartY + metricLineHeight * 3 + 24;
-    drawPanel(BASE_WIDTH / 2 - 230, lessonY - 18, 460, 52, "rgba(19,58,78,0.72)", null, 16, 0);
+    let cursorY = metricsStartY + metricLineHeight * 3 + 18;
 
+    if (result.recipeVerdict) {
+      const verdictColor = result.recipeVerdict.correct
+        ? "rgba(19,68,50,0.75)"
+        : "rgba(68,19,19,0.75)";
+      const verdictBorder = result.recipeVerdict.correct
+        ? "rgba(134,255,190,0.7)"
+        : "rgba(255,160,160,0.7)";
+      drawPanel(BASE_WIDTH / 2 - 270, cursorY, 540, 44, verdictColor, verdictBorder, 12, 2);
+      ctx.fillStyle = result.recipeVerdict.correct ? "#b8ffda" : "#ffcfcf";
+      ctx.font = "600 13px Space Grotesk";
+      const lines = drawWrappedText(
+        result.recipeVerdict.correct ? `✓ ${result.recipeVerdict.text}` : `✗ ${result.recipeVerdict.text}`,
+        BASE_WIDTH / 2,
+        cursorY + 16,
+        490,
+        16,
+        "center"
+      );
+      cursorY += lines * 16 + 38;
+    }
+
+    const lessonText = result.lesson
+      ? `Lesson: ${result.lesson}`
+      : result.victory
+        ? "Lesson: clean data, correct recipe, and defended rollout produced a deployable model."
+        : "Lesson: rushed or noisy training left the model below deployment quality.";
+    drawPanel(BASE_WIDTH / 2 - 270, cursorY, 540, 48, "rgba(19,58,78,0.72)", null, 14, 0);
     ctx.fillStyle = "#a9dcf0";
-    ctx.font = "500 15px Space Grotesk";
-    const lessonLineCount = drawWrappedText(
-      result.lesson
-        ? `Lesson: ${result.lesson}`
-        : result.victory
-          ? "Lesson: better packet coverage created a deployable model."
-          : "Lesson: rushed or noisy training left the model below deployment quality.",
-      BASE_WIDTH / 2,
-      lessonY,
-      420,
-      19,
-      "center"
-    );
+    ctx.font = "500 13px Space Grotesk";
+    const lessonLineCount = drawWrappedText(lessonText, BASE_WIDTH / 2, cursorY + 14, 500, 16, "center");
+    cursorY += lessonLineCount * 16 + 38;
 
-    const buttonStartY = lessonY + lessonLineCount * 19 + 22;
+    if (result.achievementsEarned && result.achievementsEarned.length > 0) {
+      const achLabels = result.achievementsEarned
+        .map((id) => {
+          const ach = ACHIEVEMENTS.find((a) => a.id === id);
+          return ach ? ach.label : id;
+        })
+        .join("  ·  ");
+      drawPanel(BASE_WIDTH / 2 - 270, cursorY - 4, 540, 36, "rgba(30,80,50,0.72)", "rgba(134,255,190,0.6)", 12, 1.5);
+      ctx.fillStyle = "#7bffb0";
+      ctx.font = "700 13px Space Grotesk";
+      ctx.fillText(`🏆 Unlocked: ${achLabels}`, BASE_WIDTH / 2, cursorY + 14);
+      cursorY += 46;
+    }
+
+    const buttonStartY = cursorY + 6;
     const buttons = getResultButtons(buttonStartY);
     state.ui.activeButtons = buttons;
     for (let i = 0; i < buttons.length; i++) {
@@ -2815,6 +3197,8 @@
       drawSettings();
     } else if (state.mode === "briefing") {
       drawBriefing();
+    } else if (state.mode === "codex") {
+      drawCodex();
     } else if (state.mode === "paused") {
       drawGameplay();
       drawPausedOverlay();
@@ -3034,6 +3418,8 @@
   document.addEventListener("visibilitychange", onVisibilityChange);
 
   resizeCanvas();
+
+  loadPersistentData();
 
   let lastTs = performance.now();
   function loop(ts) {
